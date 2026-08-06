@@ -63,6 +63,9 @@ Add to your MCP configuration:
 
 > Point `Z2M_MQTT_URL` at your **MQTT broker**, not at the Zigbee2MQTT frontend port. If Zigbee2MQTT's `configuration.yaml` says `mqtt.server: mqtt://192.168.1.10:1883`, use that value verbatim.
 
+> Behind a corporate npm proxy? If `npm config get registry` is not `https://registry.npmjs.org/`, your proxy's upstream feed may not carry this package. Add an explicit override to the args rather than changing your global registry:
+> `"args": ["-y", "--registry", "https://registry.npmjs.org/", "zigbee2mqtt-mcp"]`
+
 ## Configuration
 
 | Variable | Default | Purpose |
