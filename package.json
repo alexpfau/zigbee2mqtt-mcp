@@ -1,0 +1,52 @@
+{
+  "name": "zigbee2mqtt-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for administering a Zigbee2MQTT estate: health reporting, network diagnostics, OTA updates, pairing and device management over the MQTT bridge API.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "zigbee2mqtt",
+    "zigbee",
+    "mqtt",
+    "smart-home",
+    "home-automation",
+    "iot"
+  ],
+  "license": "MIT",
+  "author": "Alex Pfau",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexpfau/zigbee2mqtt-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alexpfau/zigbee2mqtt-mcp/issues"
+  },
+  "homepage": "https://github.com/alexpfau/zigbee2mqtt-mcp#readme",
+  "type": "module",
+  "bin": {
+    "zigbee2mqtt-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "mqtt": "^5.14.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.9",
+    "typescript": "^5.9.3"
+  }
+}

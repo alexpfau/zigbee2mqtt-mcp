@@ -1,0 +1,882 @@
+import type { Z2MClient } from "./client.js";
+import type { Config } from "./config.js";
+import {
+  buildHealthReport,
+  detectCapabilities,
+  isCoordinator,
+  normalize,
+  type Device,
+  type RawDevice,
+} from "./devices.js";
+
+export type Tier = "read" | "safe" | "full";
+
+export interface ToolContext {
+  client: Z2MClient;
+  config: Config;
+}
+
+export interface ToolDef {
+  name: string;
+  tier: Tier;
+  description: string;
+  inputSchema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+  handler: (args: Record<string, any>, ctx: ToolContext) => Promise<unknown>;
+}
+
+const EMPTY = { type: "object" as const, properties: {} };
+
+const DEVICE_ID = {
+  type: "string",
+  description: "Device friendly_name or ieee_address.",
+};
+
+// --------------------------------------------------------------------- helpers
+
+async function loadDevices(ctx: ToolContext, collectSeconds?: number) {
+  if (collectSeconds) {
+    await ctx.client.collectState(Math.min(Number(collectSeconds), 120) * 1000);
+  }
+  const snap = await ctx.client.snapshot();
+  const raw = (snap.devices as RawDevice[]).filter((d) => !isCoordinator(d));
+  const devices = raw.map((d) => normalize(d, snap.deviceState, snap.availability));
+  const capabilities = detectCapabilities(snap.info, snap.availability);
+  return { snap, raw, devices, capabilities };
+}
+
+const COLLECT_SECONDS = {
+  type: "number",
+  description:
+    "Listen for live device traffic for this many seconds before answering, to populate linkquality, " +
+    "battery and OTA fields that Zigbee2MQTT does not publish as retained messages. Max 120.",
+};
+
+function findRaw(raw: RawDevice[], id: string): RawDevice {
+  const needle = id.toLowerCase();
+  const match = raw.find(
+    (d) => d.friendly_name.toLowerCase() === needle || d.ieee_address.toLowerCase() === needle,
+  );
+  if (match) return match;
+
+  const partial = raw.filter((d) => d.friendly_name.toLowerCase().includes(needle));
+  if (partial.length === 1) return partial[0]!;
+  if (partial.length > 1) {
+    throw new Error(
+      `'${id}' matches ${partial.length} devices: ${partial
+        .slice(0, 10)
+        .map((d) => d.friendly_name)
+        .join(", ")}. Use an exact friendly_name or ieee_address.`,
+    );
+  }
+  throw new Error(`No device matches '${id}'. Use z2m_list_devices to see available devices.`);
+}
+
+function requireConfirm(args: Record<string, any>, action: string): void {
+  if (args.confirm !== true) {
+    throw new Error(`${action} is irreversible or disruptive. Re-run with confirm=true to proceed.`);
+  }
+}
+
+function summariseExposes(exposes: unknown[] | undefined): string[] {
+  const out: string[] = [];
+  const walk = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node.features)) {
+      for (const feature of node.features) walk(feature);
+      if (node.type && !node.property) out.push(`${node.type}`);
+      return;
+    }
+    if (node.property) out.push(`${node.property}:${node.type ?? "unknown"}`);
+  };
+  for (const expose of exposes ?? []) walk(expose);
+  return [...new Set(out)];
+}
+
+// ----------------------------------------------------------------- read tools
+
+const readTools: ToolDef[] = [
+  {
+    name: "z2m_bridge_info",
+    tier: "read",
+    description:
+      "Get Zigbee2MQTT bridge status: version, coordinator type and firmware, Zigbee channel and PAN ID, " +
+      "permit_join state, log level, whether a restart is required, and host OS/memory. " +
+      "Start here to understand the estate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        include_config: {
+          type: "boolean",
+          description: "Include the full Zigbee2MQTT configuration (large). Default false.",
+        },
+      },
+    },
+    handler: async (args, ctx) => {
+      const snap = await ctx.client.snapshot();
+      const info = (snap.info ?? {}) as Record<string, any>;
+      const health = snap.health as Record<string, any> | undefined;
+      const capabilities = detectCapabilities(snap.info, snap.availability);
+      const result: Record<string, unknown> = {
+        bridge_state: snap.state?.state ?? "unknown",
+        version: info.version,
+        commit: info.commit,
+        coordinator: info.coordinator,
+        network: info.network,
+        permit_join: info.permit_join,
+        permit_join_end: info.permit_join_end
+          ? new Date(Number(info.permit_join_end) * 1000).toISOString()
+          : undefined,
+        log_level: info.log_level,
+        restart_required: info.restart_required,
+        os: info.os,
+        mqtt: info.mqtt,
+        zigbee_herdsman: info.zigbee_herdsman,
+        zigbee_herdsman_converters: info.zigbee_herdsman_converters,
+        device_count: (snap.devices as RawDevice[]).filter((d) => !isCoordinator(d)).length,
+        group_count: snap.groups.length,
+        capabilities,
+        runtime: health
+          ? {
+              uptime_hours: health.process?.uptime_sec
+                ? Math.round(Number(health.process.uptime_sec) / 360) / 10
+                : undefined,
+              process_memory_mb: health.process?.memory_used_mb,
+              os_load_average: health.os?.load_average,
+              mqtt_connected: health.mqtt?.connected,
+              mqtt_queued: health.mqtt?.queued,
+              mqtt_published: health.mqtt?.published,
+              mqtt_received: health.mqtt?.received,
+            }
+          : undefined,
+      };
+      if (args.include_config) result.config = info.config;
+      return result;
+    },
+  },
+
+  {
+    name: "z2m_list_devices",
+    tier: "read",
+    description:
+      "List Zigbee devices with administrative detail: type, model, vendor, power source, link quality, " +
+      "battery, availability, last_seen, interview state and pending OTA updates. Supports filtering and " +
+      "sorting, so it is the main tool for questions like 'which devices are offline' or 'which have the weakest signal'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "Case-insensitive substring match on name, model, vendor or description." },
+        type: { type: "string", enum: ["Router", "EndDevice"], description: "Filter by Zigbee device type." },
+        availability: { type: "string", enum: ["online", "offline", "unknown"] },
+        only_problems: {
+          type: "boolean",
+          description: "Only devices that are offline, disabled, unsupported, mid-interview, weak-signal or low-battery.",
+        },
+        has_update: { type: "boolean", description: "Only devices with a pending OTA firmware update." },
+        sort_by: {
+          type: "string",
+          enum: ["friendly_name", "linkquality", "battery", "last_seen", "model", "vendor"],
+          description: "Default friendly_name. Numeric sorts are ascending, so weakest/lowest first.",
+        },
+        collect_seconds: COLLECT_SECONDS,
+        limit: { type: "number", description: "Maximum number of devices to return." },
+      },
+    },
+    handler: async (args, ctx) => {
+      const { devices, capabilities } = await loadDevices(ctx, args.collect_seconds);
+      let list = devices;
+
+      if (args.search) {
+        const needle = String(args.search).toLowerCase();
+        list = list.filter((d) =>
+          [d.friendly_name, d.model, d.vendor, d.description]
+            .filter(Boolean)
+            .some((field) => String(field).toLowerCase().includes(needle)),
+        );
+      }
+      if (args.type) list = list.filter((d) => d.type === args.type);
+      if (args.availability) {
+        list = list.filter((d) => (d.availability ?? "unknown") === args.availability);
+      }
+      if (args.has_update) list = list.filter((d) => d.update?.state === "available");
+      if (args.only_problems) {
+        list = list.filter(
+          (d) =>
+            d.availability === "offline" ||
+            d.disabled ||
+            !d.supported ||
+            d.interview_state !== "SUCCESSFUL" ||
+            (d.linkquality !== undefined && d.linkquality < ctx.config.weakLinkThreshold) ||
+            (d.battery !== undefined && d.battery < ctx.config.lowBatteryThreshold) ||
+            d.battery_low === true,
+        );
+      }
+
+      const sortBy = (args.sort_by as keyof Device | undefined) ?? "friendly_name";
+      list = [...list].sort((a, b) => {
+        const av = a[sortBy];
+        const bv = b[sortBy];
+        if (av === undefined && bv === undefined) return 0;
+        if (av === undefined) return 1;
+        if (bv === undefined) return -1;
+        if (typeof av === "number" && typeof bv === "number") return av - bv;
+        return String(av).localeCompare(String(bv));
+      });
+
+      const total = list.length;
+      if (args.limit) list = list.slice(0, Number(args.limit));
+
+      return { total, returned: list.length, capabilities, devices: list };
+    },
+  },
+
+  {
+    name: "z2m_get_device",
+    tier: "read",
+    description:
+      "Get full detail for one device: current state, exposed properties, configurable device options with " +
+      "their schema, endpoints, bindings and configured reportings. Use before changing options or bindings.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: DEVICE_ID,
+        include_raw: {
+          type: "boolean",
+          description: "Include the raw exposes/options definitions (verbose). Default false.",
+        },
+      },
+      required: ["device"],
+    },
+    handler: async (args, ctx) => {
+      const { snap, raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      const device = normalize(target, snap.deviceState, snap.availability);
+
+      const result: Record<string, unknown> = {
+        ...device,
+        definition_source: target.definition?.source,
+        model_id: target.model_id,
+        exposes: summariseExposes(target.definition?.exposes),
+        settable_options: (target.definition?.options ?? []).map((o: any) => ({
+          property: o?.property,
+          type: o?.type,
+          description: o?.description,
+          value_min: o?.value_min,
+          value_max: o?.value_max,
+          values: o?.values,
+        })),
+        endpoints: target.endpoints,
+        current_state: snap.deviceState.get(target.friendly_name) ?? null,
+      };
+      if (args.include_raw) {
+        result.raw_exposes = target.definition?.exposes;
+        result.raw_options = target.definition?.options;
+      }
+      return result;
+    },
+  },
+
+  {
+    name: "z2m_health_report",
+    tier: "read",
+    description:
+      "Audit the whole Zigbee estate in one call and return everything that needs attention: offline devices, " +
+      "weak links, stale devices, low batteries, failed or pending interviews, unsupported devices, disabled " +
+      "devices, pending OTA updates, and devices that keep rejoining or changing network address. " +
+      "Use this to answer 'is my Zigbee network healthy?'.",
+    inputSchema: {
+      type: "object",
+      properties: { collect_seconds: COLLECT_SECONDS },
+    },
+    handler: async (args, ctx) => {
+      const { snap, devices, capabilities } = await loadDevices(ctx, args.collect_seconds);
+      return buildHealthReport(
+        devices,
+        snap.info,
+        snap.state,
+        snap.health as Record<string, any> | undefined,
+        capabilities,
+        ctx.config,
+      );
+    },
+  },
+
+  {
+    name: "z2m_network_map",
+    tier: "read",
+    description:
+      "Scan the Zigbee mesh topology and return per-device parent, depth, link quality and route count, plus " +
+      "orphaned or weakly-attached devices. WARNING: the scan makes the network less responsive and can take " +
+      "10 seconds to several minutes depending on estate size. Run it deliberately, not routinely.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        include_routes: { type: "boolean", description: "Include active routes. Slower. Default false." },
+        raw: { type: "boolean", description: "Return the unsummarised graph. Default false." },
+        timeout_ms: { type: "number", description: "Scan timeout. Default 180000." },
+      },
+    },
+    handler: async (args, ctx) => {
+      const data = await ctx.client.request<any>(
+        "networkmap",
+        { type: "raw", routes: args.include_routes === true },
+        Number(args.timeout_ms ?? 180_000),
+      );
+      const value = data?.value ?? data;
+      if (args.raw) return value;
+
+      const nodes: any[] = value?.nodes ?? [];
+      const links: any[] = value?.links ?? [];
+      const byAddress = new Map<string, any>(nodes.map((n) => [n.ieeeAddr, n]));
+
+      const summary = nodes.map((node) => {
+        const inbound = links.filter((l) => l.targetIeeeAddr === node.ieeeAddr);
+        const best = inbound.sort((a, b) => (b.linkquality ?? 0) - (a.linkquality ?? 0))[0];
+        return {
+          friendly_name: node.friendlyName,
+          ieee_address: node.ieeeAddr,
+          type: node.type,
+          parent: best ? byAddress.get(best.sourceIeeeAddr)?.friendlyName ?? best.sourceIeeeAddr : null,
+          linkquality: best?.linkquality,
+          depth: best?.depth,
+          relationship: best?.relationship,
+          neighbour_count: inbound.length,
+          route_count: best?.routes?.length ?? 0,
+        };
+      });
+
+      return {
+        node_count: nodes.length,
+        link_count: links.length,
+        orphans: summary.filter((n) => n.parent === null && n.type !== "Coordinator"),
+        weak: summary.filter(
+          (n) => n.linkquality !== undefined && n.linkquality < ctx.config.weakLinkThreshold,
+        ),
+        nodes: summary,
+      };
+    },
+  },
+
+  {
+    name: "z2m_list_groups",
+    tier: "read",
+    description: "List Zigbee groups with their members and scenes.",
+    inputSchema: EMPTY,
+    handler: async (_args, ctx) => {
+      const snap = await ctx.client.snapshot();
+      return { total: snap.groups.length, groups: snap.groups };
+    },
+  },
+
+  {
+    name: "z2m_get_logs",
+    tier: "read",
+    description:
+      "Read Zigbee2MQTT bridge logs and lifecycle events (device_joined, device_interview, device_leave, " +
+      "device_announce). Returns buffered history by default, or watches live for a window. Use to diagnose " +
+      "pairing failures and rejoin loops.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        level: {
+          type: "string",
+          enum: ["error", "warning", "info"],
+          description: "Minimum severity. Note: Zigbee2MQTT never publishes debug lines to MQTT.",
+        },
+        contains: { type: "string", description: "Only lines containing this substring (case-insensitive)." },
+        watch_seconds: {
+          type: "number",
+          description: "Collect new lines live for this many seconds instead of returning buffered history. Max 120.",
+        },
+        limit: { type: "number", description: "Maximum lines to return. Default 100." },
+        include_events: { type: "boolean", description: "Include bridge lifecycle events. Default true." },
+      },
+    },
+    handler: async (args, ctx) => {
+      const rank: Record<string, number> = { error: 3, warning: 2, warn: 2, info: 1 };
+      const min = args.level ? rank[String(args.level)] ?? 0 : 0;
+
+      let lines = args.watch_seconds
+        ? await ctx.client.collectLogs(Math.min(Number(args.watch_seconds), 120) * 1000)
+        : [...ctx.client.recentLogs()];
+
+      lines = lines.filter((l) => (rank[l.level] ?? 1) >= min);
+      if (args.contains) {
+        const needle = String(args.contains).toLowerCase();
+        lines = lines.filter((l) => l.message.toLowerCase().includes(needle));
+      }
+      const limit = Number(args.limit ?? 100);
+
+      return {
+        note: ctx.client.recentLogs().length === 0 && !args.watch_seconds
+          ? "No logs buffered yet. Logs are captured only while this server is connected; use watch_seconds to collect live."
+          : undefined,
+        logs: lines.slice(-limit),
+        events: args.include_events === false ? undefined : ctx.client.recentEvents().slice(-limit),
+      };
+    },
+  },
+];
+
+// ----------------------------------------------------------- safe write tools
+
+const safeTools: ToolDef[] = [
+  {
+    name: "z2m_check_updates",
+    tier: "safe",
+    description:
+      "Actively query devices for available OTA firmware updates. Without arguments this checks every " +
+      "OTA-capable device, which generates real Zigbee traffic and can take a while. For a passive answer " +
+      "with no network cost, use z2m_health_report instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: { ...DEVICE_ID, description: "Check a single device. Omit to check all mains-powered devices." },
+        timeout_ms: { type: "number", description: "Per-device timeout. Default 60000." },
+      },
+    },
+    handler: async (args, ctx) => {
+      const { raw } = await loadDevices(ctx);
+      const timeout = Number(args.timeout_ms ?? 60_000);
+      const targets = args.device
+        ? [findRaw(raw, String(args.device))]
+        : raw.filter((d) => d.disabled !== true && d.type === "Router");
+
+      const results: unknown[] = [];
+      for (const target of targets) {
+        try {
+          const data = await ctx.client.request<any>(
+            "device/ota_update/check",
+            { id: target.friendly_name },
+            timeout,
+          );
+          results.push({ device: target.friendly_name, ...data });
+        } catch (error) {
+          results.push({ device: target.friendly_name, error: (error as Error).message });
+        }
+      }
+      return { checked: results.length, results };
+    },
+  },
+
+  {
+    name: "z2m_permit_join",
+    tier: "safe",
+    description:
+      "Open or close the network for new devices to join. Optionally scope joining to a single router, which " +
+      "is the recommended way to pair a device into a specific part of the mesh.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        time: {
+          type: "number",
+          description: "Seconds to allow joining. 0 closes the network. Maximum 254.",
+        },
+        device: {
+          type: "string",
+          description: "Restrict joining to this router's friendly_name, or 'coordinator'. Omit to allow via any router.",
+        },
+      },
+      required: ["time"],
+    },
+    handler: async (args, ctx) => {
+      const payload: Record<string, unknown> = { time: Number(args.time) };
+      if (args.device) payload.device = String(args.device);
+      return ctx.client.request("permit_join", payload);
+    },
+  },
+
+  {
+    name: "z2m_set_device_options",
+    tier: "safe",
+    description:
+      "Change Zigbee2MQTT device options such as transition, retain, debounce, temperature_precision or " +
+      "calibration offsets. Call z2m_get_device first to see settable_options for that device. " +
+      "The response reports whether a bridge restart is required.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: DEVICE_ID,
+        options: { type: "object", description: 'Options to merge, e.g. {"transition": 1, "retain": true}.' },
+      },
+      required: ["device", "options"],
+    },
+    handler: async (args, ctx) => {
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      return ctx.client.request("device/options", { id: target.friendly_name, options: args.options });
+    },
+  },
+
+  {
+    name: "z2m_rename_device",
+    tier: "safe",
+    description:
+      "Rename a device's friendly_name. Renaming changes its MQTT topic, so anything referencing the old " +
+      "name (automations, dashboards, scripts) must be updated. Set homeassistant_rename to also rename the " +
+      "Home Assistant entity.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: DEVICE_ID,
+        new_name: { type: "string", description: "New friendly_name. '/' creates folder structure in MQTT." },
+        homeassistant_rename: {
+          type: "boolean",
+          description: "Also update the Home Assistant entity ID. Default false.",
+        },
+      },
+      required: ["device", "new_name"],
+    },
+    handler: async (args, ctx) => {
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      return ctx.client.request("device/rename", {
+        from: target.friendly_name,
+        to: String(args.new_name),
+        homeassistant_rename: args.homeassistant_rename === true,
+      });
+    },
+  },
+
+  {
+    name: "z2m_configure_device",
+    tier: "safe",
+    description:
+      "Re-run a device's configuration routine (bindings and attribute reporting). Use when a device stopped " +
+      "reporting values. Battery devices must be woken immediately before calling this.",
+    inputSchema: { type: "object", properties: { device: DEVICE_ID }, required: ["device"] },
+    handler: async (args, ctx) => {
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      return ctx.client.request("device/configure", { id: target.friendly_name }, 60_000);
+    },
+  },
+
+  {
+    name: "z2m_interview_device",
+    tier: "safe",
+    description:
+      "Re-interview a device so Zigbee2MQTT re-reads its endpoints, clusters and basic attributes. Useful " +
+      "after a firmware upgrade adds functionality, or to recover a device stuck in a failed interview.",
+    inputSchema: { type: "object", properties: { device: DEVICE_ID }, required: ["device"] },
+    handler: async (args, ctx) => {
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      return ctx.client.request("device/interview", { id: target.friendly_name }, 120_000);
+    },
+  },
+
+  {
+    name: "z2m_set_state",
+    tier: "safe",
+    description:
+      "Send a state command to a device or group, e.g. {\"state\":\"ON\"} or {\"brightness\":128}. " +
+      "Also supports reading values back with mode='get'. Consult z2m_get_device exposes for valid properties.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: { type: "string", description: "Device or group friendly_name, or ieee_address." },
+        payload: { type: "object", description: 'Command payload, e.g. {"state": "ON"}.' },
+        mode: { type: "string", enum: ["set", "get"], description: "Default 'set'." },
+      },
+      required: ["device", "payload"],
+    },
+    handler: async (args, ctx) => {
+      const snap = await ctx.client.snapshot();
+      const raw = (snap.devices as RawDevice[]).filter((d) => !isCoordinator(d));
+      const groupNames = (snap.groups as any[]).map((g) => String(g.friendly_name));
+      const id = String(args.device);
+      const name = groupNames.some((g) => g.toLowerCase() === id.toLowerCase())
+        ? id
+        : findRaw(raw, id).friendly_name;
+
+      const mode = args.mode === "get" ? "get" : "set";
+      await ctx.client.publish(`${ctx.config.baseTopic}/${name}/${mode}`, args.payload);
+      return { published_to: `${ctx.config.baseTopic}/${name}/${mode}`, payload: args.payload };
+    },
+  },
+
+  {
+    name: "z2m_manage_group",
+    tier: "safe",
+    description:
+      "Create or remove groups, rename them, and add or remove device members. Groups let a single Zigbee " +
+      "multicast control many devices, which is far more responsive than commanding each device in turn.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["add", "remove", "rename", "add_member", "remove_member", "remove_all_members"],
+        },
+        group: { type: "string", description: "Group friendly_name or numeric ID." },
+        new_name: { type: "string", description: "Required for action=rename." },
+        id: { type: "number", description: "Optional numeric ID for action=add." },
+        device: { type: "string", description: "Device for member actions. Append /ENDPOINT to target an endpoint." },
+        force: { type: "boolean", description: "Force removal even if a member device is unreachable." },
+      },
+      required: ["action", "group"],
+    },
+    handler: async (args, ctx) => {
+      const group = String(args.group);
+      switch (args.action) {
+        case "add":
+          return ctx.client.request("group/add", {
+            friendly_name: group,
+            ...(args.id !== undefined ? { id: Number(args.id) } : {}),
+          });
+        case "remove":
+          return ctx.client.request("group/remove", { id: group, force: args.force === true });
+        case "rename":
+          if (!args.new_name) throw new Error("new_name is required for action=rename");
+          return ctx.client.request("group/rename", { from: group, to: String(args.new_name) });
+        case "add_member":
+          if (!args.device) throw new Error("device is required for action=add_member");
+          return ctx.client.request("group/members/add", { group, device: String(args.device) });
+        case "remove_member":
+          if (!args.device) throw new Error("device is required for action=remove_member");
+          return ctx.client.request("group/members/remove", { group, device: String(args.device) });
+        case "remove_all_members":
+          return ctx.client.request("group/members/remove_all", { group });
+        default:
+          throw new Error(`Unknown action '${args.action}'`);
+      }
+    },
+  },
+
+  {
+    name: "z2m_bind",
+    tier: "safe",
+    description:
+      "Bind or unbind clusters between two devices, or between a device and a group. Binding lets a remote " +
+      "control a light directly over Zigbee without a round trip through the coordinator, so it keeps working " +
+      "even if the bridge is down. Append /ENDPOINT to target a specific endpoint, e.g. 'my_remote/left'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["bind", "unbind", "clear"] },
+        from: { type: "string", description: "Source device, optionally with /ENDPOINT." },
+        to: { type: "string", description: "Target device or group. Not needed for action=clear." },
+        clusters: {
+          type: "array",
+          items: { type: "string" },
+          description: "Clusters to bind, e.g. ['genOnOff','genLevelCtrl']. Omit to bind all supported clusters.",
+        },
+      },
+      required: ["action", "from"],
+    },
+    handler: async (args, ctx) => {
+      if (args.action === "clear") {
+        return ctx.client.request("device/binds/clear", { id: String(args.from) }, 60_000);
+      }
+      if (!args.to) throw new Error("'to' is required for bind and unbind");
+      const payload: Record<string, unknown> = { from: String(args.from), to: String(args.to) };
+      if (Array.isArray(args.clusters) && args.clusters.length > 0) payload.clusters = args.clusters;
+      return ctx.client.request(args.action === "bind" ? "device/bind" : "device/unbind", payload, 60_000);
+    },
+  },
+
+  {
+    name: "z2m_configure_reporting",
+    tier: "safe",
+    description:
+      "Configure how often a device reports an attribute. Tightening intervals improves responsiveness; " +
+      "loosening them saves battery. Set maximum_report_interval to 65535 to disable reporting. " +
+      "Battery devices must be woken immediately before calling this.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: DEVICE_ID,
+        endpoint: { type: "number", description: "Endpoint ID. Default 1." },
+        cluster: { type: "string", description: "Cluster name, e.g. 'genLevelCtrl'." },
+        attribute: { type: "string", description: "Attribute name, e.g. 'currentLevel'." },
+        minimum_report_interval: { type: "number", description: "Seconds. 0 means report on every change." },
+        maximum_report_interval: { type: "number", description: "Seconds. 65535 disables reporting." },
+        reportable_change: { type: "number", description: "Minimum change worth reporting, in the attribute's unit." },
+      },
+      required: ["device", "cluster", "attribute", "minimum_report_interval", "maximum_report_interval"],
+    },
+    handler: async (args, ctx) => {
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      return ctx.client.request(
+        "device/reporting/configure",
+        {
+          id: target.friendly_name,
+          endpoint: Number(args.endpoint ?? 1),
+          cluster: String(args.cluster),
+          attribute: String(args.attribute),
+          minimum_report_interval: Number(args.minimum_report_interval),
+          maximum_report_interval: Number(args.maximum_report_interval),
+          ...(args.reportable_change !== undefined ? { reportable_change: Number(args.reportable_change) } : {}),
+        },
+        60_000,
+      );
+    },
+  },
+];
+
+// ----------------------------------------------------------- full write tools
+
+const fullTools: ToolDef[] = [
+  {
+    name: "z2m_remove_device",
+    tier: "full",
+    description:
+      "Remove a device from the Zigbee network. The coordinator can only ask a device to leave, so sleeping " +
+      "battery devices often fail. force=true deletes it from the database only, leaving it holding the " +
+      "network key until factory reset. Requires confirm=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: DEVICE_ID,
+        force: { type: "boolean", description: "Delete from the database even if the device does not respond." },
+        block: { type: "boolean", description: "Prevent the device from rejoining." },
+        clear_cache: { type: "boolean", description: "Discard cached data so a rejoin re-interviews from scratch." },
+        confirm: { type: "boolean", description: "Must be true to proceed." },
+      },
+      required: ["device", "confirm"],
+    },
+    handler: async (args, ctx) => {
+      requireConfirm(args, "Removing a device");
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      return ctx.client.request(
+        "device/remove",
+        {
+          id: target.friendly_name,
+          force: args.force === true,
+          block: args.block === true,
+          clear_cache: args.clear_cache === true,
+        },
+        60_000,
+      );
+    },
+  },
+
+  {
+    name: "z2m_ota_update",
+    tier: "full",
+    description:
+      "Flash a device's firmware over the air. This can take many minutes, must not be interrupted, and can " +
+      "brick the device if it loses power. Check availability with z2m_check_updates first. Requires confirm=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        device: DEVICE_ID,
+        action: {
+          type: "string",
+          enum: ["update", "abort", "schedule", "unschedule"],
+          description: "Default 'update'. 'schedule' defers the flash until the device next checks in.",
+        },
+        timeout_ms: { type: "number", description: "Default 1800000 (30 minutes)." },
+        confirm: { type: "boolean", description: "Must be true to proceed." },
+      },
+      required: ["device", "confirm"],
+    },
+    handler: async (args, ctx) => {
+      requireConfirm(args, "Flashing firmware");
+      const { raw } = await loadDevices(ctx);
+      const target = findRaw(raw, String(args.device));
+      const action = String(args.action ?? "update");
+      const topic =
+        action === "abort"
+          ? "device/ota_update/update/abort"
+          : action === "schedule"
+            ? "device/ota_update/schedule"
+            : action === "unschedule"
+              ? "device/ota_update/unschedule"
+              : "device/ota_update/update";
+      return ctx.client.request(topic, { id: target.friendly_name }, Number(args.timeout_ms ?? 1_800_000));
+    },
+  },
+
+  {
+    name: "z2m_restart_bridge",
+    tier: "full",
+    description:
+      "Restart Zigbee2MQTT. Briefly interrupts all Zigbee control. Needed after changing options that report " +
+      "restart_required=true.",
+    inputSchema: {
+      type: "object",
+      properties: { confirm: { type: "boolean", description: "Must be true to proceed." } },
+      required: ["confirm"],
+    },
+    handler: async (args, ctx) => {
+      requireConfirm(args, "Restarting Zigbee2MQTT");
+      return ctx.client.request("restart", {}, 30_000);
+    },
+  },
+
+  {
+    name: "z2m_set_bridge_options",
+    tier: "full",
+    description:
+      "Change Zigbee2MQTT configuration at runtime, e.g. log level, availability or last_seen. " +
+      "The config schema is available via z2m_bridge_info with include_config=true. Some changes require a restart.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        options: {
+          type: "object",
+          description: 'Nested config fragment, e.g. {"advanced": {"last_seen": "ISO_8601"}}.',
+        },
+        confirm: { type: "boolean", description: "Must be true to proceed." },
+      },
+      required: ["options", "confirm"],
+    },
+    handler: async (args, ctx) => {
+      requireConfirm(args, "Changing bridge configuration");
+      return ctx.client.request("options", { options: args.options }, 30_000);
+    },
+  },
+
+  {
+    name: "z2m_coordinator_check",
+    tier: "full",
+    description:
+      "Check whether any routers are missing from the coordinator's memory, which causes pairing failures and " +
+      "devices dropping off. Only supported on Texas Instruments adapters (CC2652/CC1352); other adapters " +
+      "will return an error.",
+    inputSchema: EMPTY,
+    handler: async (_args, ctx) => ctx.client.request("coordinator_check", {}, 60_000),
+  },
+
+  {
+    name: "z2m_touchlink",
+    tier: "full",
+    description:
+      "Touchlink scan, identify or factory reset. Factory reset affects the physically nearest Touchlink " +
+      "device, which may not be the one you intend. Requires confirm=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["scan", "identify", "factory_reset"] },
+        ieee_address: { type: "string", description: "Required for identify and targeted factory_reset." },
+        channel: { type: "number", description: "Required for identify and targeted factory_reset." },
+        confirm: { type: "boolean", description: "Must be true to proceed." },
+      },
+      required: ["action", "confirm"],
+    },
+    handler: async (args, ctx) => {
+      requireConfirm(args, "Touchlink");
+      const payload =
+        args.ieee_address && args.channel !== undefined
+          ? { ieee_address: String(args.ieee_address), channel: Number(args.channel) }
+          : {};
+      return ctx.client.request(`touchlink/${String(args.action)}`, payload, 120_000);
+    },
+  },
+];
+
+const TIER_RANK: Record<Tier, number> = { read: 0, safe: 1, full: 2 };
+
+export function selectTools(mode: Config["writeMode"]): ToolDef[] {
+  const all = [...readTools, ...safeTools, ...fullTools];
+  if (mode === "off") return all.filter((t) => t.tier === "read");
+  const max = TIER_RANK[mode];
+  return all.filter((t) => TIER_RANK[t.tier] <= max);
+}
