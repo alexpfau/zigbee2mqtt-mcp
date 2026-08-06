@@ -47,6 +47,8 @@ export interface Device {
   last_seen?: string;
   update?: { state?: string; installed_version?: unknown; latest_version?: unknown };
   endpoint_count: number;
+  /** Whether this device has published state during the current session. */
+  has_state: boolean;
 }
 
 export interface Capabilities {
@@ -94,6 +96,7 @@ export function normalize(
     disabled: raw.disabled === true,
     interview_state: raw.interview_state ?? (raw.interview_completed ? "SUCCESSFUL" : "PENDING"),
     endpoint_count: Object.keys(raw.endpoints ?? {}).length,
+    has_state: deviceState.has(raw.friendly_name),
   };
 
   if (raw.network_address !== undefined) device.network_address = raw.network_address;
@@ -146,7 +149,6 @@ export function buildHealthReport(
 ): HealthReport {
   const issues: Record<string, HealthIssue[]> = {
     offline: [],
-    never_seen: [],
     stale: [],
     weak_link: [],
     low_battery: [],
@@ -197,15 +199,14 @@ export function buildHealthReport(
         detail: from && to ? `OTA update available: ${from} -> ${to}` : "OTA update available",
       });
     }
-    if (capabilities.last_seen) {
-      if (!device.last_seen) {
-        issues.never_seen!.push({ ...ref, detail: "No message received since Zigbee2MQTT started" });
-      } else {
-        const seen = Date.parse(device.last_seen);
-        if (!Number.isNaN(seen) && seen < staleCutoff) {
-          const hours = Math.round((Date.now() - seen) / 3_600_000);
-          issues.stale!.push({ ...ref, detail: `Last seen ${hours}h ago (> ${config.staleHours}h)` });
-        }
+    // A missing last_seen is not a finding: Zigbee2MQTT only publishes it when a
+    // device reports, so absence means no data yet. The authoritative signal for
+    // a device that has never reported is bridge/health messages === 0, below.
+    if (capabilities.last_seen && device.last_seen) {
+      const seen = Date.parse(device.last_seen);
+      if (!Number.isNaN(seen) && seen < staleCutoff) {
+        const hours = Math.round((Date.now() - seen) / 3_600_000);
+        issues.stale!.push({ ...ref, detail: `Last seen ${hours}h ago (> ${config.staleHours}h)` });
       }
     }
 
@@ -242,6 +243,12 @@ export function buildHealthReport(
     hints.push(
       "Offline detection is unavailable because device availability is not enabled. " +
         "Set availability.enabled to true in your Zigbee2MQTT configuration.",
+    );
+  }
+  if (capabilities.last_seen && devices.some((d) => d.has_state && !d.last_seen)) {
+    hints.push(
+      "Staleness coverage is partial: some devices last reported before advanced.last_seen was enabled, " +
+        "so they carry no timestamp yet. Coverage completes as each device next reports.",
     );
   }
   if (devices.every((d) => d.linkquality === undefined)) {
