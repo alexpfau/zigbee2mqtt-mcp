@@ -59,12 +59,15 @@ describe("detectCapabilities", () => {
     assert.equal(detectCapabilities({ config: { availability: false } }, noAvailability).availability, false);
   });
 
-  it("offers coordinator_check only for Texas Instruments adapters", () => {
+  it("offers coordinator_check for adapters that support coordinator backups", () => {
+    // Zigbee2MQTT gates this on adapter.supportsBackup(), not on vendor.
+    // Verified working against a live EmberZNet coordinator.
     const caps = (type: string) => detectCapabilities({ coordinator: { type } }, noAvailability);
     assert.equal(caps("zStack3x0").coordinator_check, true);
     assert.equal(caps("znp").coordinator_check, true);
-    assert.equal(caps("EmberZNet").coordinator_check, false);
+    assert.equal(caps("EmberZNet").coordinator_check, true);
     assert.equal(caps("ConBee").coordinator_check, false);
+    assert.equal(caps("ZiGate").coordinator_check, false);
     assert.equal(caps("EmberZNet").coordinator_type, "EmberZNet");
   });
 });

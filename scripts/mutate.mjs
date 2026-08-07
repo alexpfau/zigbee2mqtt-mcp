@@ -22,6 +22,12 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** Each entry replaces `from` with `to` in `file`; `from` must appear exactly once. */
 const MUTANTS = [
   {
+    name: "coordinator_check gated on vendor again",
+    file: "src/devices.ts",
+    from: "const BACKUP_CAPABLE = /^(zStack|znp|ember)/i;",
+    to: "const BACKUP_CAPABLE = /^z(Stack|np)/i;",
+  },
+  {
     name: "weak-link boundary off-by-one",
     file: "src/devices.ts",
     from: "device.linkquality < config.weakLinkThreshold",
@@ -254,6 +260,12 @@ const MUTANTS = [
     file: "src/render.ts",
     from: "if (text.length <= MAX_RESULT_BYTES) return text;",
     to: "return text;",
+  },
+  {
+    name: "capped network map hides the real size",
+    file: "src/tools.ts",
+    from: "        total_nodes: allNodes.length,",
+    to: "        total_nodes: nodes.length,",
   },
   {
     name: "network map picks the worst parent",

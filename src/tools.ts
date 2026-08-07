@@ -511,7 +511,11 @@ const readTools: ToolDef[] = [
       });
 
       return {
+        total_nodes: allNodes.length,
         node_count: nodes.length,
+        ...(nodes.length < allNodes.length
+          ? { truncated: `Showing ${nodes.length} of ${allNodes.length} nodes; raise max_nodes to see more.` }
+          : {}),
         link_count: links.length,
         orphans: summary.filter((n) => n.parent === null && n.type !== "Coordinator"),
         weak: summary.filter(
@@ -594,9 +598,10 @@ const readTools: ToolDef[] = [
     annotations: readOnly("Check coordinator memory"),
     description:
       "Check whether any routers are missing from the coordinator's memory, which causes pairing failures and " +
-      "devices dropping off. Changes nothing, but queries the coordinator directly. Only supported on Texas " +
-      "Instruments adapters (CC2652/CC1352); other adapters return an error — z2m_bridge_info reports whether " +
-      "yours qualifies under capabilities.coordinator_check. Returns {missing_routers[]}; an empty list is " +
+      "devices dropping off. Changes nothing, but queries the coordinator directly. Needs an adapter that " +
+      "supports coordinator backups, which Texas Instruments zStack and Silicon Labs EmberZNet do and " +
+      "deCONZ and ZiGate do not; unsupported adapters return an error, and z2m_bridge_info reports the " +
+      "expectation under capabilities.coordinator_check. Returns {missing_routers[]}; an empty list is " +
       "healthy. Use z2m_network_map for a topology view on any adapter.",
     inputSchema: EMPTY,
     handler: async (_args, ctx) => ctx.client.request("coordinator_check", {}, 60_000),

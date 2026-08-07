@@ -105,7 +105,7 @@ try {
   const present = withGroup.groups.some((g) => g.friendly_name === GROUP);
   check("new group visible immediately", present);
 
-  await call("z2m_manage_group", { action: "remove", group: GROUP });
+  await call("z2m_manage_group", { action: "remove", group: GROUP, confirm: true });
   const withoutGroup = await call("z2m_list_groups", {});
   const gone = !withoutGroup.groups.some((g) => g.friendly_name === GROUP);
   check("group removal visible immediately", gone);
@@ -118,7 +118,7 @@ try {
       console.error(`  CLEANUP FAILED, device may still be named "${renamed}": ${e.message}`),
     );
   }
-  await call("z2m_manage_group", { action: "remove", group: GROUP }).catch(() => undefined);
+  await call("z2m_manage_group", { action: "remove", group: GROUP, confirm: true }).catch(() => undefined);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -55,10 +55,19 @@ export interface Capabilities {
   /** advanced.last_seen is 'disable' by default, so timestamps are often absent. */
   last_seen: boolean;
   availability: boolean;
-  /** coordinator_check is only implemented for Texas Instruments adapters. */
+  /**
+   * coordinator_check needs an adapter that supports coordinator backups,
+   * not a particular vendor. Verified working on EmberZNet.
+   */
   coordinator_check: boolean;
   coordinator_type?: string;
 }
+
+/**
+ * Adapters whose backup support makes coordinator_check work. Zigbee2MQTT
+ * gates it on adapter.supportsBackup(), which deCONZ and ZiGate do not have.
+ */
+const BACKUP_CAPABLE = /^(zStack|znp|ember)/i;
 
 export function detectCapabilities(
   info: Record<string, unknown> | undefined,
@@ -75,7 +84,7 @@ export function detectCapabilities(
       availability.size > 0 ||
       availabilitySetting === true ||
       (typeof availabilitySetting === "object" && availabilitySetting !== null),
-    coordinator_check: typeof coordinatorType === "string" && /^z(Stack|np)/i.test(coordinatorType),
+    coordinator_check: typeof coordinatorType === "string" && BACKUP_CAPABLE.test(coordinatorType),
     coordinator_type: typeof coordinatorType === "string" ? coordinatorType : undefined,
   };
 }

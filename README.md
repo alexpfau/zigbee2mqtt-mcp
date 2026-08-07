@@ -151,7 +151,7 @@ Some fields depend on your Zigbee2MQTT configuration. The server detects what is
 | `last_seen` | `advanced.last_seen` set to e.g. `ISO_8601` (default is `disable`) | Staleness checks are skipped and a hint is returned |
 | `availability` | `availability.enabled: true` | Offline detection is skipped and a hint is returned |
 | `linkquality`, `battery`, `update` | Live device traffic — Zigbee2MQTT does not retain device state topics | Pass `collect_seconds` to listen briefly, or use `z2m_network_map` for authoritative link quality |
-| `z2m_coordinator_check` | A Texas Instruments adapter (CC2652/CC1352) | Returns an error on other adapters; `z2m_bridge_info` reports whether it is supported |
+| `z2m_coordinator_check` | An adapter that supports coordinator backups (TI zStack, Silicon Labs EmberZNet; not deCONZ or ZiGate) | Returns an error on unsupported adapters; `z2m_bridge_info` reports the expectation |
 
 ## Security notes
 

@@ -414,5 +414,25 @@ describe("response shaping", () => {
     const leaf = result.nodes.find((n: any) => n.friendly_name === "Leaf");
     assert.equal(leaf.parent, "Near Router", "the weakest neighbour was reported as the parent");
     assert.equal(leaf.linkquality, 180);
+    assert.equal(result.total_nodes, 3);
+    assert.equal(result.truncated, undefined, "nothing was capped, so no notice belongs here");
+  });
+
+  it("says so when the node list is capped", async () => {
+    // Otherwise a capped map reads as a smaller mesh than the user actually has.
+    const response = {
+      value: {
+        nodes: Array.from({ length: 6 }, (_, i) => ({
+          ieeeAddr: `0x${i}`,
+          friendlyName: `n${i}`,
+          type: "Router",
+        })),
+        links: [],
+      },
+    };
+    const { result } = await callWith(byName("z2m_network_map"), { max_nodes: 2 }, response);
+    assert.equal(result.total_nodes, 6);
+    assert.equal(result.node_count, 2);
+    assert.match(result.truncated, /2 of 6 nodes/);
   });
 });
