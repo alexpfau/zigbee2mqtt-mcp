@@ -1,0 +1,57 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.alexpfau/zigbee2mqtt-mcp",
+  "description": "Administer a Zigbee2MQTT estate: health reporting, mesh diagnostics, OTA updates, pairing, binding and device options over the MQTT bridge API.",
+  "repository": {
+    "url": "https://github.com/alexpfau/zigbee2mqtt-mcp",
+    "source": "github"
+  },
+  "version": "0.2.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "zigbee2mqtt-mcp",
+      "version": "0.2.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "Z2M_MQTT_URL",
+          "description": "MQTT broker URL used by Zigbee2MQTT, e.g. mqtt://192.168.1.10:1883. Supports mqtt://, mqtts://, ws:// and wss://. This is the broker, not the Zigbee2MQTT frontend port.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "Z2M_MQTT_USERNAME",
+          "description": "MQTT broker username, if the broker requires authentication.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "Z2M_MQTT_PASSWORD",
+          "description": "MQTT broker password, if the broker requires authentication.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "Z2M_BASE_TOPIC",
+          "description": "Zigbee2MQTT base topic. Must match mqtt.base_topic in configuration.yaml. Defaults to zigbee2mqtt.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "Z2M_WRITE_MODE",
+          "description": "Tool exposure tier: off (read-only), safe (default; adds non-destructive writes such as pairing, options, rename and binding) or full (adds device removal, OTA flashing, Touchlink and bridge restart).",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
