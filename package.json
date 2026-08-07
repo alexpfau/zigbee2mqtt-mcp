@@ -1,6 +1,6 @@
 {
   "name": "zigbee2mqtt-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "mcpName": "io.github.alexpfau/zigbee2mqtt-mcp",
   "description": "Model Context Protocol server for administering a Zigbee2MQTT estate: health reporting, network diagnostics, OTA updates, pairing and device management over the MQTT bridge API.",
   "keywords": [
