@@ -1,6 +1,6 @@
 {
   "name": "zigbee2mqtt-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Model Context Protocol server for administering a Zigbee2MQTT estate: health reporting, network diagnostics, OTA updates, pairing and device management over the MQTT bridge API.",
   "keywords": [
     "mcp",

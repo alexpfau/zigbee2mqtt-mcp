@@ -82,7 +82,7 @@ export function loadConfig(): Config {
     key: file("Z2M_MQTT_KEY"),
     connectTimeoutMs: int("Z2M_CONNECT_TIMEOUT_MS", 10_000),
     requestTimeoutMs: int("Z2M_REQUEST_TIMEOUT_MS", 15_000),
-    writeMode: oneOf("Z2M_WRITE_MODE", ["off", "safe", "full"] as const, "full"),
+    writeMode: oneOf("Z2M_WRITE_MODE", ["off", "safe", "full"] as const, "safe"),
     logLevel: oneOf("Z2M_LOG_LEVEL", ["silent", "error", "warn", "info", "debug"] as const, "error"),
     weakLinkThreshold: int("Z2M_WEAK_LINK_THRESHOLD", 30),
     lowBatteryThreshold: int("Z2M_LOW_BATTERY_THRESHOLD", 20),
