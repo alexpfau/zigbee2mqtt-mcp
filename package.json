@@ -34,7 +34,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc",
@@ -48,7 +48,7 @@
     "mqtt": "^5.14.1"
   },
   "devDependencies": {
-    "@types/node": "^20.19.43",
+    "@types/node": "^22.20.1",
     "typescript": "^7.0.2"
   }
 }

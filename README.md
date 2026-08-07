@@ -24,7 +24,7 @@ If you already run Home Assistant, your Zigbee devices are exposed there and an 
 
 ## Install
 
-Requires Node.js 20 or newer and network access to the MQTT broker that Zigbee2MQTT uses.
+Requires Node.js 22 or newer and network access to the MQTT broker that Zigbee2MQTT uses.
 
 ```bash
 npx zigbee2mqtt-mcp
@@ -175,7 +175,7 @@ npm install
 npm run build
 npm run watch
 
-# Unit tests. No broker required; they run on every push across Node 20, 22 and 24.
+# Unit tests. No broker required; they run on every push across Node 22 and 24.
 npm test
 
 # Manual smoke test against a real instance

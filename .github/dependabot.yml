@@ -8,8 +8,8 @@ updates:
       dev-dependencies:
         dependency-type: development
     ignore:
-      # Types must track the oldest Node in `engines`, not the newest release, or
-      # the compiler stops catching use of APIs that minimum does not have.
+      # Types must track the oldest Node in `engines` (22), not the newest
+      # release, or the compiler stops catching use of APIs that minimum lacks.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
