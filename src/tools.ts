@@ -1,4 +1,6 @@
 import type { Z2MClient } from "./client.js";
+import { NoBridgeDataError } from "./client.js";
+import { scrubSecrets } from "./redact.js";
 import type { Config } from "./config.js";
 import {
   buildHealthReport,
@@ -88,8 +90,12 @@ const COLLECT_SECONDS = {
     "battery and OTA fields that Zigbee2MQTT does not publish as retained messages. Max 120.",
 };
 
-function findRaw(raw: RawDevice[], id: string): RawDevice {
-  const needle = id.toLowerCase();
+/** Exported for tests; disambiguation rules are easy to regress. */
+export function findRaw(raw: RawDevice[], id: string): RawDevice {
+  const needle = id.trim().toLowerCase();
+  // Every name contains the empty string, so an unguarded blank would match the
+  // first device on a single-device estate.
+  if (!needle) throw new Error("A device friendly_name or ieee_address is required.");
   const match = raw.find(
     (d) => d.friendly_name.toLowerCase() === needle || d.ieee_address.toLowerCase() === needle,
   );
@@ -132,6 +138,59 @@ function summariseExposes(exposes: unknown[] | undefined): string[] {
 // ----------------------------------------------------------------- read tools
 
 const readTools: ToolDef[] = [
+  {
+    name: "z2m_connection_status",
+    tier: "read",
+    annotations: readOnly("Check MQTT connection"),
+    description:
+      "Check whether this server can reach the MQTT broker and whether Zigbee2MQTT is publishing to it. " +
+      "Read-only, and the only tool that reports rather than throws when the connection is down, so call " +
+      "it first when any other tool fails with a connection or timeout error. Distinguishes an unreachable " +
+      "broker from a reachable broker carrying no Zigbee2MQTT data, which usually means Z2M_BASE_TOPIC " +
+      "does not match the mqtt.base_topic setting in Zigbee2MQTT. Reports the broker URL with credentials " +
+      "redacted, TLS settings, cached message counts and the active write mode.",
+    inputSchema: EMPTY,
+    handler: async (_args, ctx) => {
+      let brokerReachable = true;
+      let zigbee2mqttResponding = true;
+      let error: string | undefined;
+      try {
+        await ctx.client.connect();
+      } catch (e) {
+        error = scrubSecrets((e as Error).message, ctx.config);
+        zigbee2mqttResponding = false;
+        // Reaching the broker and finding nothing on it is a different fault
+        // from not reaching the broker at all.
+        brokerReachable = e instanceof NoBridgeDataError;
+      }
+
+      const status = ctx.client.status();
+      const hints: string[] = [];
+      if (!brokerReachable) {
+        hints.push(
+          "Could not reach the broker. Check that Z2M_MQTT_URL points at the MQTT broker Zigbee2MQTT " +
+            "uses rather than the Zigbee2MQTT frontend port, and that any credentials are correct.",
+        );
+      } else if (!zigbee2mqttResponding || status.cached.bridge_topics === 0) {
+        hints.push(
+          `The broker is reachable, but nothing was published under '${status.base_topic}/bridge/'. ` +
+            "Either Zigbee2MQTT is not running against this broker, or Z2M_BASE_TOPIC does not match " +
+            "its mqtt.base_topic setting.",
+        );
+      }
+      if (status.tls.enabled && !status.tls.reject_unauthorized) {
+        hints.push("TLS certificate verification is disabled, so the broker's identity is not checked.");
+      }
+
+      return {
+        broker_reachable: brokerReachable,
+        zigbee2mqtt_responding: zigbee2mqttResponding,
+        ...status,
+        error,
+        hints,
+      };
+    },
+  },
   {
     name: "z2m_bridge_info",
     tier: "read",
@@ -476,6 +535,19 @@ const readTools: ToolDef[] = [
       };
     },
   },
+  {
+    name: "z2m_coordinator_check",
+    tier: "read",
+    annotations: readOnly("Check coordinator memory"),
+    description:
+      "Check whether any routers are missing from the coordinator's memory, which causes pairing failures and " +
+      "devices dropping off. Changes nothing, but queries the coordinator directly. Only supported on Texas " +
+      "Instruments adapters (CC2652/CC1352); other adapters return an error — z2m_bridge_info reports whether " +
+      "yours qualifies under capabilities.coordinator_check. Returns {missing_routers[]}; an empty list is " +
+      "healthy. Use z2m_network_map for a topology view on any adapter.",
+    inputSchema: EMPTY,
+    handler: async (_args, ctx) => ctx.client.request("coordinator_check", {}, 60_000),
+  },
 ];
 
 // ----------------------------------------------------------- safe write tools
@@ -579,7 +651,7 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_rename_device",
     tier: "safe",
-    annotations: mutating("Rename device"),
+    annotations: mutating("Rename device", { destructive: true }),
     description:
       "Rename a device's friendly_name. Renaming changes its MQTT topic, so anything referencing the old " +
       "name (automations, dashboards, scripts) breaks until updated — this is reversible only by renaming " +
@@ -680,13 +752,14 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_manage_group",
     tier: "safe",
-    annotations: mutating("Manage groups"),
+    annotations: mutating("Manage groups", { destructive: true }),
     description:
       "Create or remove groups, rename them, and add or remove device members. Groups let a single Zigbee " +
       "multicast control many devices, which is far more responsive than commanding each device in turn. " +
       "Removing a group does not affect the devices themselves, but fails if a member is unreachable unless " +
       "force is set — with force the device keeps the group membership internally. Use z2m_list_groups to " +
-      "inspect groups first, and z2m_set_state to control a group once created.",
+      "inspect groups first, and z2m_set_state to control a group once created. The remove and " +
+      "remove_all_members actions discard configuration and need confirm=true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -699,6 +772,7 @@ const safeTools: ToolDef[] = [
         id: { type: "number", description: "Optional numeric ID for action=add." },
         device: { type: "string", description: "Device for member actions. Append /ENDPOINT to target an endpoint." },
         force: { type: "boolean", description: "Force removal even if a member device is unreachable." },
+        confirm: { type: "boolean", description: "Required for action=remove and action=remove_all_members." },
       },
       required: ["action", "group"],
     },
@@ -711,6 +785,7 @@ const safeTools: ToolDef[] = [
             ...(args.id !== undefined ? { id: Number(args.id) } : {}),
           });
         case "remove":
+          requireConfirm(args, `Removing group '${group}'`);
           return ctx.client.request("group/remove", { id: group, force: args.force === true });
         case "rename":
           if (!args.new_name) throw new Error("new_name is required for action=rename");
@@ -722,6 +797,7 @@ const safeTools: ToolDef[] = [
           if (!args.device) throw new Error("device is required for action=remove_member");
           return ctx.client.request("group/members/remove", { group, device: String(args.device) });
         case "remove_all_members":
+          requireConfirm(args, `Removing every member of group '${group}'`);
           return ctx.client.request("group/members/remove_all", { group });
         default:
           throw new Error(`Unknown action '${args.action}'`);
@@ -732,12 +808,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_bind",
     tier: "safe",
-    annotations: mutating("Bind or unbind clusters"),
+    annotations: mutating("Bind or unbind clusters", { destructive: true }),
     description:
       "Bind or unbind clusters between two devices, or between a device and a group. Binding lets a remote " +
       "control a light directly over Zigbee without a round trip through the coordinator, so it keeps working " +
       "even if the bridge is down. Reversible with action='unbind'; action='clear' removes all binds from the " +
-      "source device at once. Append /ENDPOINT to target a specific endpoint, e.g. 'my_remote/left' — check " +
+      "source device at once and needs confirm=true, because the previous set cannot be recovered. " +
+      "Append /ENDPOINT to target a specific endpoint, e.g. 'my_remote/left' — check " +
       "z2m_get_device endpoints first. Both devices must be awake.",
     inputSchema: {
       type: "object",
@@ -750,11 +827,13 @@ const safeTools: ToolDef[] = [
           items: { type: "string" },
           description: "Clusters to bind, e.g. ['genOnOff','genLevelCtrl']. Omit to bind all supported clusters.",
         },
+        confirm: { type: "boolean", description: "Required for action=clear." },
       },
       required: ["action", "from"],
     },
     handler: async (args, ctx) => {
       if (args.action === "clear") {
+        requireConfirm(args, `Clearing every binding from '${String(args.from)}'`);
         return ctx.client.request("device/binds/clear", { id: String(args.from) }, 60_000);
       }
       if (!args.to) throw new Error("'to' is required for bind and unbind");
@@ -932,20 +1011,6 @@ const fullTools: ToolDef[] = [
       requireConfirm(args, "Changing bridge configuration");
       return ctx.client.request("options", { options: args.options }, 30_000);
     },
-  },
-
-  {
-    name: "z2m_coordinator_check",
-    tier: "full",
-    annotations: mutating("Check coordinator memory", { idempotent: true }),
-    description:
-      "Check whether any routers are missing from the coordinator's memory, which causes pairing failures and " +
-      "devices dropping off. Changes nothing, but queries the coordinator directly. Only supported on Texas " +
-      "Instruments adapters (CC2652/CC1352); other adapters return an error — z2m_bridge_info reports whether " +
-      "yours qualifies under capabilities.coordinator_check. Returns {missing_routers[]}; an empty list is " +
-      "healthy. Use z2m_network_map for a topology view on any adapter.",
-    inputSchema: EMPTY,
-    handler: async (_args, ctx) => ctx.client.request("coordinator_check", {}, 60_000),
   },
 
   {
