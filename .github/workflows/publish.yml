@@ -43,11 +43,17 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the tarball carries no local network details
+      - name: Verify the tarball carries no private network details
         run: |
-          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
-          if grep -rIqE '(^|[^0-9])(10\.255\.255\.255|private-registry\.invalid)' dist README.md; then
-            echo "Refusing to publish: build output references a private host" >&2
+          npm pack --dry-run
+          # 192.168.1.10 is the documented example broker and is expected.
+          leaked=$(grep -rhoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' dist README.md \
+            | sort -u \
+            | awk -F. '($1==10) || ($1==192 && $2==168) || ($1==172 && $2>=16 && $2<=31)' \
+            | grep -vx '192.168.1.10' || true)
+          if [ -n "$leaked" ]; then
+            echo "Refusing to publish: build output references private hosts:" >&2
+            echo "$leaked" >&2
             exit 1
           fi
 
