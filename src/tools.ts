@@ -28,6 +28,8 @@ export interface ToolAnnotations {
 export interface ToolContext {
   client: Z2MClient;
   config: Config;
+  /** Set when the server started without a usable configuration. */
+  configError?: string;
 }
 
 export interface ToolDef {
@@ -35,6 +37,8 @@ export interface ToolDef {
   tier: Tier;
   description: string;
   annotations: ToolAnnotations;
+  /** Allows the tool to run when configuration is missing, to report on it. */
+  runsUnconfigured?: boolean;
   inputSchema: {
     type: "object";
     properties: Record<string, unknown>;
@@ -142,15 +146,26 @@ const readTools: ToolDef[] = [
     name: "z2m_connection_status",
     tier: "read",
     annotations: readOnly("Check MQTT connection"),
+    runsUnconfigured: true,
     description:
       "Check whether this server can reach the MQTT broker and whether Zigbee2MQTT is publishing to it. " +
-      "Read-only, and the only tool that reports rather than throws when the connection is down, so call " +
-      "it first when any other tool fails with a connection or timeout error. Distinguishes an unreachable " +
-      "broker from a reachable broker carrying no Zigbee2MQTT data, which usually means Z2M_BASE_TOPIC " +
-      "does not match the mqtt.base_topic setting in Zigbee2MQTT. Reports the broker URL with credentials " +
-      "redacted, TLS settings, cached message counts and the active write mode.",
+      "Read-only, and the only tool that reports rather than throws when the connection is down or not " +
+      "configured at all, so call it first when any other tool fails with a connection or timeout error. " +
+      "Distinguishes an unreachable broker from a reachable broker carrying no Zigbee2MQTT data, which " +
+      "usually means Z2M_BASE_TOPIC does not match the mqtt.base_topic setting in Zigbee2MQTT. Reports " +
+      "the broker URL with credentials redacted, TLS settings, cached message counts and the write mode.",
     inputSchema: EMPTY,
     handler: async (_args, ctx) => {
+      if (ctx.configError) {
+        return {
+          configured: false,
+          broker_reachable: false,
+          zigbee2mqtt_responding: false,
+          error: ctx.configError,
+          hints: ["Set Z2M_MQTT_URL in the server's environment, then call this tool again."],
+        };
+      }
+
       let brokerReachable = true;
       let zigbee2mqttResponding = true;
       let error: string | undefined;
@@ -159,9 +174,9 @@ const readTools: ToolDef[] = [
       } catch (e) {
         error = scrubSecrets((e as Error).message, ctx.config);
         zigbee2mqttResponding = false;
-        // Reaching the broker and finding nothing on it is a different fault
-        // from not reaching the broker at all.
-        brokerReachable = e instanceof NoBridgeDataError;
+        // Whether the broker answered is a fact the client observed, not
+        // something to infer from which error happened to surface.
+        brokerReachable = ctx.client.status().broker_handshake || e instanceof NoBridgeDataError;
       }
 
       const status = ctx.client.status();
@@ -183,6 +198,7 @@ const readTools: ToolDef[] = [
       }
 
       return {
+        configured: true,
         broker_reachable: brokerReachable,
         zigbee2mqtt_responding: zigbee2mqttResponding,
         ...status,

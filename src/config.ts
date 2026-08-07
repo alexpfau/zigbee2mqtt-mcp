@@ -28,9 +28,13 @@ export interface Config {
 function int(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isNaN(parsed)) {
+  // parseInt would accept '12abc' as 12, which hides a typo in a timeout.
+  if (!/^-?\d+$/.test(raw.trim())) {
     throw new Error(`${name} must be an integer, got ${JSON.stringify(raw)}`);
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (parsed < 0) {
+    throw new Error(`${name} must not be negative, got ${JSON.stringify(raw)}`);
   }
   return parsed;
 }

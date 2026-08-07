@@ -23,6 +23,18 @@ describe("Z2MClient message handling", () => {
     assert.equal(c.status().cached.bridge_topics, 2);
   });
 
+  it("ignores the echo of its own outbound requests", () => {
+    // We subscribe to the whole base topic, so everything we publish comes
+    // straight back. Caching it would inflate the diagnostic counts and
+    // satisfy the post-write refresh guard before Zigbee2MQTT republishes.
+    const { c, feed } = client();
+    feed("zigbee2mqtt/bridge/info", { version: "2.12.1" });
+    const before = c.status().cached.bridge_topics;
+    feed("zigbee2mqtt/bridge/request/device/rename", { from: "a", to: "b", transaction: "mcp-1" });
+    feed("zigbee2mqtt/bridge/request/health_check", { transaction: "mcp-2" });
+    assert.equal(c.status().cached.bridge_topics, before, "an outbound request was cached as bridge state");
+  });
+
   it("keeps only the latest payload per topic", () => {
     const { c, feed } = client();
     feed("zigbee2mqtt/bridge/info", { version: "1" });
@@ -83,6 +95,19 @@ describe("Z2MClient message handling", () => {
     const [event] = c.recentEvents();
     assert.equal(event?.type, "device_joined");
     assert.deepEqual(event?.data, { friendly_name: "lamp" });
+  });
+
+  it("scrubs credentials out of relayed bridge logs", () => {
+    // Zigbee2MQTT logs its own broker URL at startup, credentials included,
+    // and z2m_get_logs hands those lines to the model verbatim.
+    const { c, feed } = client({ password: "hunter2secret" });
+    feed("zigbee2mqtt/bridge/logging", {
+      level: "info",
+      message: "Connecting to MQTT server at mqtt://alice:hunter2secret@192.0.2.1:1883",
+    });
+    const [entry] = c.recentLogs();
+    assert.ok(!entry!.message.includes("hunter2secret"), entry!.message);
+    assert.ok(entry!.message.includes("192.0.2.1"), "host should stay visible");
   });
 
   it("defaults an event with no type rather than dropping it", () => {

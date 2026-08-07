@@ -86,6 +86,26 @@ describe("loadConfig", () => {
     });
   });
 
+  it("rejects trailing junk rather than silently truncating it", () => {
+    // parseInt('12abc') is 12, which would hide a typo in a timeout.
+    withEnv({ ...URL_ONLY, Z2M_REQUEST_TIMEOUT_MS: "12abc" }, () => {
+      assert.throws(() => loadConfig(), /must be an integer/);
+    });
+    withEnv({ ...URL_ONLY, Z2M_STALE_HOURS: "24.5" }, () => {
+      assert.throws(() => loadConfig(), /must be an integer/);
+    });
+  });
+
+  it("rejects a negative value", () => {
+    withEnv({ ...URL_ONLY, Z2M_CONNECT_TIMEOUT_MS: "-1" }, () => {
+      assert.throws(() => loadConfig(), /must not be negative/);
+    });
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    withEnv({ ...URL_ONLY, Z2M_STALE_HOURS: " 48 " }, () => assert.equal(loadConfig().staleHours, 48));
+  });
+
   it("parses the documented falsey spellings for booleans", () => {
     for (const value of ["0", "false", "no", "off", "OFF"]) {
       withEnv({ ...URL_ONLY, Z2M_MQTT_REJECT_UNAUTHORIZED: value }, () =>

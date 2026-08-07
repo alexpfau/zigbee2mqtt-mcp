@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   const log = createLogger(config.logLevel);
   if (configError) log.error(configError);
   const client = new Z2MClient(config, log);
-  const ctx: ToolContext = { client, config };
+  const ctx: ToolContext = { client, config, configError };
 
   const tools = selectTools(config.writeMode);
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -48,14 +48,17 @@ async function main(): Promise<void> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (configError) {
+    const tool = byName.get(request.params.name);
+
+    // The connection diagnostic has to survive a missing URL: that is the most
+    // common misconfiguration, and it is the tool a user reaches for.
+    if (configError && !tool?.runsUnconfigured) {
       return {
         isError: true,
         content: [{ type: "text" as const, text: configError }],
       };
     }
 
-    const tool = byName.get(request.params.name);
     if (!tool) {
       const known = [...byName.keys()].join(", ");
       return {

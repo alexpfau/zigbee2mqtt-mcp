@@ -123,7 +123,7 @@ Opt in to the destructive tier only when you want it:
 
 | Tool | Purpose |
 | --- | --- |
-| `z2m_connection_status` | Broker reachability, TLS posture and cached message counts — reports instead of throwing when the connection is down |
+| `z2m_connection_status` | Broker reachability, TLS posture and cached message counts — reports instead of throwing, even when nothing is configured yet |
 | `z2m_bridge_info` | Version, coordinator, channel, PAN ID, permit_join, restart_required, runtime stats |
 | `z2m_list_devices` | Filter and sort devices by type, availability, link quality, battery, pending update |
 | `z2m_get_device` | Exposes, settable options, endpoints, bindings, configured reportings, current state |
@@ -154,7 +154,7 @@ Some fields depend on your Zigbee2MQTT configuration. The server detects what is
 
 ## Security notes
 
-- The broker URL may carry credentials (`mqtt://user:pass@host`). They are redacted everywhere the URL is echoed back to a model or written to a log, and error text from the MQTT client is scrubbed before it leaves the process.
+- The broker URL may carry credentials (`mqtt://user:pass@host`). They are redacted everywhere the URL is echoed back to a model or written to a log, and error text from the MQTT client is scrubbed before it leaves the process. Zigbee2MQTT logs its own broker URL at startup, so lines relayed by `z2m_get_logs` are scrubbed too.
 - `safe` mode can actuate anything on the mesh via `z2m_set_state`, including locks, valves and sirens. Use `off` if that matters.
 - `z2m_permit_join` opens the network to any nearby Zigbee device for the duration of the window. It is in `safe` because it is routine and reversible, but it is a security boundary.
 

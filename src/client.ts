@@ -53,6 +53,8 @@ export interface ConnectionStatus {
     client_certificate: boolean;
   };
   authenticated: boolean;
+  /** True once the broker completed a CONNACK, even if the session later failed. */
+  broker_handshake: boolean;
   cached: {
     bridge_topics: number;
     device_state: number;
@@ -94,6 +96,7 @@ export class Z2MClient {
   private transactionCounter = 0;
   private lastMessageAt = 0;
   private bridgeRevision = 0;
+  private brokerHandshake = false;
 
   private readonly bridge = new Map<string, unknown>();
   private readonly deviceState = new Map<string, Record<string, unknown>>();
@@ -168,6 +171,7 @@ export class Z2MClient {
       client.on("message", (topic, payload) => this.handleMessage(topic, payload));
 
       client.on("connect", () => {
+        this.brokerHandshake = true;
         this.log.debug("connected, subscribing");
         client.subscribe(`${config.baseTopic}/#`, { qos: 1 }, (error) => {
           if (error) {
@@ -245,7 +249,8 @@ export class Z2MClient {
           push(this.logs, LOG_BUFFER, {
             received_at: new Date().toISOString(),
             level: String(entry.level ?? "info"),
-            message: String(entry.message ?? raw),
+            // Zigbee2MQTT logs its own broker URL at startup, credentials included.
+            message: scrubSecrets(String(entry.message ?? raw), this.config),
             namespace: entry.namespace,
           });
         }
@@ -265,6 +270,11 @@ export class Z2MClient {
       }
 
       case "bridge":
+        // We subscribe to the whole base topic, so our own publishes to
+        // bridge/request/* come straight back. Caching them would inflate the
+        // topic count and, worse, satisfy awaitBridgeRefresh before
+        // Zigbee2MQTT has republished anything.
+        if (route.name.startsWith("request/")) return;
         this.bridge.set(route.name, parsed ?? raw);
         this.bridgeRevision++;
         return;
@@ -286,6 +296,13 @@ export class Z2MClient {
           this.deviceState.set(route.device, parsed as Record<string, unknown>);
         }
         return;
+
+      default: {
+        // Adding a TopicRoute variant without handling it is a compile error,
+        // rather than messages being silently dropped.
+        const unhandled: never = route;
+        void unhandled;
+      }
     }
   }
 
@@ -416,6 +433,7 @@ export class Z2MClient {
         client_certificate: this.config.cert !== undefined,
       },
       authenticated: this.config.username !== undefined,
+      broker_handshake: this.brokerHandshake,
       cached: {
         bridge_topics: this.bridge.size,
         device_state: this.deviceState.size,
