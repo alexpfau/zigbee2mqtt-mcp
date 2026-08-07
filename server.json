@@ -6,12 +6,12 @@
     "url": "https://github.com/alexpfau/zigbee2mqtt-mcp",
     "source": "github"
   },
-  "version": "0.2.2",
+  "version": "0.2.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "zigbee2mqtt-mcp",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "transport": {
         "type": "stdio"
       },
