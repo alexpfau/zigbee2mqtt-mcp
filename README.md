@@ -73,7 +73,7 @@ Add to your MCP configuration:
 | `Z2M_MQTT_URL` | *required* | Broker URL. `mqtt://`, `mqtts://`, `ws://`, `wss://` |
 | `Z2M_MQTT_USERNAME` / `Z2M_MQTT_PASSWORD` | – | Broker credentials |
 | `Z2M_BASE_TOPIC` | `zigbee2mqtt` | Must match `mqtt.base_topic` |
-| `Z2M_WRITE_MODE` | `full` | `off`, `safe` or `full` |
+| `Z2M_WRITE_MODE` | `safe` | `off`, `safe` or `full` |
 | `Z2M_LOG_LEVEL` | `error` | Diagnostics on stderr |
 | `Z2M_WEAK_LINK_THRESHOLD` | `30` | Link quality below this is flagged |
 | `Z2M_LOW_BATTERY_THRESHOLD` | `20` | Battery percentage below this is flagged |
@@ -90,10 +90,16 @@ Tools above the active tier are not registered at all, so a model cannot reach f
 | Mode | Exposes |
 | --- | --- |
 | `off` | Read-only tools |
-| `safe` | Read plus non-destructive writes: pairing, options, rename, configure, interview, binding, reporting, groups, state |
+| `safe` | **Default.** Read plus non-destructive writes: pairing, options, rename, configure, interview, binding, reporting, groups, state |
 | `full` | Everything, including device removal, OTA flashing, Touchlink and bridge restart |
 
 Irreversible tools (`z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`) additionally require `confirm: true` on every call.
+
+Opt in to the destructive tier only when you want it:
+
+```jsonc
+"env": { "Z2M_WRITE_MODE": "full" }
+```
 
 ## Tools
 
@@ -152,7 +158,11 @@ Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/smoke.mjs z2m_list_devices '{
 
 ## Safety
 
-This server can remove devices from your network and flash firmware. Both are irreversible and OTA failures can brick hardware. Run with `Z2M_WRITE_MODE=safe` or `off` if you do not want an assistant able to do that. Broker credentials are read from the environment and never logged.
+This server can remove devices from your network and flash firmware. Both are irreversible and OTA failures can brick hardware. Those tools live in the `full` tier, which is **not** enabled by default — you must opt in with `Z2M_WRITE_MODE=full`. Broker credentials are read from the environment and never logged.
+
+## Status
+
+Early release. Developed and tested against a 50-device EmberZNet estate on Zigbee2MQTT 2.12.x. Other adapters (Texas Instruments, deCONZ/ConBee, zStack), TLS and WebSocket brokers, and large estates are unverified. Bug reports and pull requests are very welcome — please include your adapter type and Zigbee2MQTT version from `z2m_bridge_info`.
 
 ## License
 

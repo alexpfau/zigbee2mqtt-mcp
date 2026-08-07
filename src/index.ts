@@ -1,10 +1,13 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Z2MClient } from "./client.js";
 import { createLogger, loadConfig } from "./config.js";
 import { selectTools, type ToolContext } from "./tools.js";
+
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -21,7 +24,7 @@ async function main(): Promise<void> {
   );
 
   const server = new Server(
-    { name: "zigbee2mqtt-mcp", version: "0.1.0" },
+    { name: "zigbee2mqtt-mcp", version },
     { capabilities: { tools: {} } },
   );
 
