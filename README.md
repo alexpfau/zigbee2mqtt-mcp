@@ -1,5 +1,10 @@
 # zigbee2mqtt-mcp
 
+[![CI](https://github.com/alexpfau/zigbee2mqtt-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alexpfau/zigbee2mqtt-mcp/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/zigbee2mqtt-mcp.svg)](https://www.npmjs.com/package/zigbee2mqtt-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![zigbee2mqtt-mcp MCP server](https://glama.ai/mcp/servers/alexpfau/zigbee2mqtt-mcp/badges/score.svg)](https://glama.ai/mcp/servers/alexpfau/zigbee2mqtt-mcp)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) server for **administering** a Zigbee2MQTT estate.
 
 Most Zigbee integrations already let an assistant turn a light on. This one is for the layer underneath: mesh health, weak links, devices that keep rejoining, stale batteries, firmware updates, pairing, binding, reporting intervals and device options — the things you normally open the Zigbee2MQTT frontend for.
@@ -94,6 +99,15 @@ Tools above the active tier are not registered at all, so a model cannot reach f
 | `full` | Everything, including device removal, OTA flashing, Touchlink and bridge restart |
 
 Irreversible tools (`z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`) additionally require `confirm: true` on every call.
+
+Every tool also advertises MCP [tool annotations](https://modelcontextprotocol.io/specification/server/tools) so a client can decide what may run without prompting:
+
+| Annotation | Meaning here |
+| --- | --- |
+| `readOnlyHint: true` | The seven read tools. They never change the network. |
+| `destructiveHint: true` | `z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options` |
+| `idempotentHint` | True where repeating the call has no additional effect |
+| `openWorldHint: true` | Always — every tool reaches a live Zigbee network |
 
 Opt in to the destructive tier only when you want it:
 

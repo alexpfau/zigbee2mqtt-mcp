@@ -11,6 +11,18 @@ import {
 
 export type Tier = "read" | "safe" | "full";
 
+/**
+ * MCP behavioural hints. Clients use these to decide whether a tool may run
+ * without asking the user, so they must be accurate rather than optimistic.
+ */
+export interface ToolAnnotations {
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
 export interface ToolContext {
   client: Z2MClient;
   config: Config;
@@ -20,6 +32,7 @@ export interface ToolDef {
   name: string;
   tier: Tier;
   description: string;
+  annotations: ToolAnnotations;
   inputSchema: {
     type: "object";
     properties: Record<string, unknown>;
@@ -27,6 +40,26 @@ export interface ToolDef {
   };
   handler: (args: Record<string, any>, ctx: ToolContext) => Promise<unknown>;
 }
+
+/** Every tool reaches a live Zigbee network, so openWorldHint is always true. */
+const readOnly = (title: string): ToolAnnotations => ({
+  title,
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+});
+
+const mutating = (
+  title: string,
+  { destructive = false, idempotent = false } = {},
+): ToolAnnotations => ({
+  title,
+  readOnlyHint: false,
+  destructiveHint: destructive,
+  idempotentHint: idempotent,
+  openWorldHint: true,
+});
 
 const EMPTY = { type: "object" as const, properties: {} };
 
@@ -102,10 +135,13 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_bridge_info",
     tier: "read",
+    annotations: readOnly("Get bridge status"),
     description:
       "Get Zigbee2MQTT bridge status: version, coordinator type and firmware, Zigbee channel and PAN ID, " +
-      "permit_join state, log level, whether a restart is required, and host OS/memory. " +
-      "Start here to understand the estate.",
+      "permit_join state, log level, whether a restart is required, and host OS/memory. Read-only. " +
+      "Start here to understand the estate, then use z2m_health_report for problems or z2m_list_devices " +
+      "for individual devices. Returns a JSON object; set include_config only if you need the full " +
+      "Zigbee2MQTT configuration, which is large.",
     inputSchema: {
       type: "object",
       properties: {
@@ -161,10 +197,14 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_list_devices",
     tier: "read",
+    annotations: readOnly("List devices"),
     description:
       "List Zigbee devices with administrative detail: type, model, vendor, power source, link quality, " +
-      "battery, availability, last_seen, interview state and pending OTA updates. Supports filtering and " +
-      "sorting, so it is the main tool for questions like 'which devices are offline' or 'which have the weakest signal'.",
+      "battery, availability, last_seen, interview state and pending OTA updates. Read-only, though " +
+      "collect_seconds will wait before answering. Use this to answer 'which devices are offline' or " +
+      "'which have the weakest signal'. Prefer z2m_health_report for a prioritised summary of everything " +
+      "wrong at once, and z2m_get_device when you need one device's exposes, options or bindings. " +
+      "Returns {total, returned, capabilities, devices[]}.",
     inputSchema: {
       type: "object",
       properties: {
@@ -236,9 +276,12 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_get_device",
     tier: "read",
+    annotations: readOnly("Get device detail"),
     description:
       "Get full detail for one device: current state, exposed properties, configurable device options with " +
-      "their schema, endpoints, bindings and configured reportings. Use before changing options or bindings.",
+      "their schema, endpoints, bindings and configured reportings. Read-only. Call this before " +
+      "z2m_set_device_options, z2m_bind or z2m_configure_reporting to discover valid values. " +
+      "Use z2m_list_devices instead when you want many devices or do not know the exact name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -282,11 +325,15 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_health_report",
     tier: "read",
+    annotations: readOnly("Audit estate health"),
     description:
       "Audit the whole Zigbee estate in one call and return everything that needs attention: offline devices, " +
       "weak links, stale devices, low batteries, failed or pending interviews, unsupported devices, disabled " +
       "devices, pending OTA updates, and devices that keep rejoining or changing network address. " +
-      "Use this to answer 'is my Zigbee network healthy?'.",
+      "Read-only and generates no Zigbee traffic, so prefer it over z2m_check_updates and z2m_network_map " +
+      "for routine checks. Use this to answer 'is my Zigbee network healthy?'. " +
+      "Returns {bridge, totals, capabilities, issues, hints}; an empty issues object means nothing is wrong. " +
+      "Note that collect_seconds makes the call wait for that many seconds before answering.",
     inputSchema: {
       type: "object",
       properties: { collect_seconds: COLLECT_SECONDS },
@@ -307,10 +354,13 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_network_map",
     tier: "read",
+    annotations: readOnly("Scan mesh topology"),
     description:
       "Scan the Zigbee mesh topology and return per-device parent, depth, link quality and route count, plus " +
       "orphaned or weakly-attached devices. WARNING: the scan makes the network less responsive and can take " +
-      "10 seconds to several minutes depending on estate size. Run it deliberately, not routinely.",
+      "10 seconds to several minutes depending on estate size. Run it deliberately, not routinely, and prefer " +
+      "z2m_health_report or z2m_list_devices when you only need per-device link quality. " +
+      "Returns {node_count, link_count, orphans, weak, nodes[]} unless raw is set.",
     inputSchema: {
       type: "object",
       properties: {
@@ -363,7 +413,11 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_list_groups",
     tier: "read",
-    description: "List Zigbee groups with their members and scenes.",
+    annotations: readOnly("List groups"),
+    description:
+      "List Zigbee groups with their members and scenes. Read-only. " +
+      "Use z2m_manage_group to change groups, and z2m_list_devices for individual devices. " +
+      "Returns {total, groups[]}; an empty list means no groups are defined.",
     inputSchema: EMPTY,
     handler: async (_args, ctx) => {
       const snap = await ctx.client.snapshot();
@@ -374,10 +428,13 @@ const readTools: ToolDef[] = [
   {
     name: "z2m_get_logs",
     tier: "read",
+    annotations: readOnly("Read bridge logs"),
     description:
       "Read Zigbee2MQTT bridge logs and lifecycle events (device_joined, device_interview, device_leave, " +
-      "device_announce). Returns buffered history by default, or watches live for a window. Use to diagnose " +
-      "pairing failures and rejoin loops.",
+      "device_announce). Read-only. Returns buffered history by default; watch_seconds instead blocks for " +
+      "that many seconds collecting new lines. Logs are only captured while this server is connected, so " +
+      "history may be empty on a fresh start — use watch_seconds then. Use to diagnose pairing failures and " +
+      "rejoin loops; prefer z2m_health_report to find which devices are affected in the first place.",
     inputSchema: {
       type: "object",
       properties: {
@@ -427,10 +484,12 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_check_updates",
     tier: "safe",
+    annotations: mutating("Check for firmware updates", { idempotent: true }),
     description:
-      "Actively query devices for available OTA firmware updates. Without arguments this checks every " +
-      "OTA-capable device, which generates real Zigbee traffic and can take a while. For a passive answer " +
-      "with no network cost, use z2m_health_report instead.",
+      "Actively query devices for available OTA firmware updates. Changes no configuration, but it does put " +
+      "real traffic on the Zigbee network and can take a minute per device. Without arguments it checks every " +
+      "mains-powered router. Prefer z2m_health_report for a passive answer at no network cost, and use this " +
+      "only when you need a fresh check. Follow with z2m_ota_update to actually flash.",
     inputSchema: {
       type: "object",
       properties: {
@@ -465,9 +524,12 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_permit_join",
     tier: "safe",
+    annotations: mutating("Open or close pairing", { idempotent: true }),
     description:
-      "Open or close the network for new devices to join. Optionally scope joining to a single router, which " +
-      "is the recommended way to pair a device into a specific part of the mesh.",
+      "Open or close the network for new devices to join. While open, any nearby Zigbee device may join, so " +
+      "keep the window short and close it with time=0 when finished. Optionally scope joining to a single " +
+      "router, which is the recommended way to pair a device into a specific part of the mesh. " +
+      "Use z2m_bridge_info to see whether joining is currently open.",
     inputSchema: {
       type: "object",
       properties: {
@@ -492,10 +554,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_set_device_options",
     tier: "safe",
+    annotations: mutating("Set device options", { idempotent: true }),
     description:
       "Change Zigbee2MQTT device options such as transition, retain, debounce, temperature_precision or " +
-      "calibration offsets. Call z2m_get_device first to see settable_options for that device. " +
-      "The response reports whether a bridge restart is required.",
+      "calibration offsets. Options are merged, not replaced, and persist in the Zigbee2MQTT configuration. " +
+      "Call z2m_get_device first to see settable_options for that device. Use z2m_set_state to change what a " +
+      "device is doing, and z2m_set_bridge_options for bridge-wide settings. The response reports whether a " +
+      "bridge restart is required.",
     inputSchema: {
       type: "object",
       properties: {
@@ -514,10 +579,12 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_rename_device",
     tier: "safe",
+    annotations: mutating("Rename device"),
     description:
       "Rename a device's friendly_name. Renaming changes its MQTT topic, so anything referencing the old " +
-      "name (automations, dashboards, scripts) must be updated. Set homeassistant_rename to also rename the " +
-      "Home Assistant entity.",
+      "name (automations, dashboards, scripts) breaks until updated — this is reversible only by renaming " +
+      "back. Set homeassistant_rename to also rename the Home Assistant entity. " +
+      "Use z2m_set_device_options for behaviour changes that do not affect the topic.",
     inputSchema: {
       type: "object",
       properties: {
@@ -544,9 +611,12 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_configure_device",
     tier: "safe",
+    annotations: mutating("Reconfigure device", { idempotent: true }),
     description:
       "Re-run a device's configuration routine (bindings and attribute reporting). Use when a device stopped " +
-      "reporting values. Battery devices must be woken immediately before calling this.",
+      "reporting values. Battery devices must be woken immediately before calling this, or it fails after a " +
+      "timeout. Use z2m_interview_device instead when Zigbee2MQTT does not know the device's capabilities at " +
+      "all, and z2m_configure_reporting to change one specific attribute rather than re-running everything.",
     inputSchema: { type: "object", properties: { device: DEVICE_ID }, required: ["device"] },
     handler: async (args, ctx) => {
       const { raw } = await loadDevices(ctx);
@@ -558,9 +628,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_interview_device",
     tier: "safe",
+    annotations: mutating("Re-interview device", { idempotent: true }),
     description:
-      "Re-interview a device so Zigbee2MQTT re-reads its endpoints, clusters and basic attributes. Useful " +
-      "after a firmware upgrade adds functionality, or to recover a device stuck in a failed interview.",
+      "Re-interview a device so Zigbee2MQTT re-reads its endpoints, clusters and basic attributes. The device " +
+      "may be briefly unavailable while this runs, and battery devices must be awake. Useful after a firmware " +
+      "upgrade adds functionality, or to recover a device stuck in a failed interview — check interview_state " +
+      "via z2m_get_device first. Use z2m_configure_device instead when the interview succeeded but reporting " +
+      "stopped working.",
     inputSchema: { type: "object", properties: { device: DEVICE_ID }, required: ["device"] },
     handler: async (args, ctx) => {
       const { raw } = await loadDevices(ctx);
@@ -572,9 +646,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_set_state",
     tier: "safe",
+    annotations: mutating("Set or read device state"),
     description:
       "Send a state command to a device or group, e.g. {\"state\":\"ON\"} or {\"brightness\":128}. " +
-      "Also supports reading values back with mode='get'. Consult z2m_get_device exposes for valid properties.",
+      "Physically changes what the device is doing, and is reversible by sending the opposite command. " +
+      "mode='get' instead requests a value without changing anything. The command is published without " +
+      "waiting for the device, so success here means the message was sent, not that the device acted — read " +
+      "z2m_get_device afterwards to confirm. Consult z2m_get_device exposes for valid properties.",
     inputSchema: {
       type: "object",
       properties: {
@@ -602,9 +680,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_manage_group",
     tier: "safe",
+    annotations: mutating("Manage groups"),
     description:
       "Create or remove groups, rename them, and add or remove device members. Groups let a single Zigbee " +
-      "multicast control many devices, which is far more responsive than commanding each device in turn.",
+      "multicast control many devices, which is far more responsive than commanding each device in turn. " +
+      "Removing a group does not affect the devices themselves, but fails if a member is unreachable unless " +
+      "force is set — with force the device keeps the group membership internally. Use z2m_list_groups to " +
+      "inspect groups first, and z2m_set_state to control a group once created.",
     inputSchema: {
       type: "object",
       properties: {
@@ -650,10 +732,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_bind",
     tier: "safe",
+    annotations: mutating("Bind or unbind clusters"),
     description:
       "Bind or unbind clusters between two devices, or between a device and a group. Binding lets a remote " +
       "control a light directly over Zigbee without a round trip through the coordinator, so it keeps working " +
-      "even if the bridge is down. Append /ENDPOINT to target a specific endpoint, e.g. 'my_remote/left'.",
+      "even if the bridge is down. Reversible with action='unbind'; action='clear' removes all binds from the " +
+      "source device at once. Append /ENDPOINT to target a specific endpoint, e.g. 'my_remote/left' — check " +
+      "z2m_get_device endpoints first. Both devices must be awake.",
     inputSchema: {
       type: "object",
       properties: {
@@ -682,10 +767,13 @@ const safeTools: ToolDef[] = [
   {
     name: "z2m_configure_reporting",
     tier: "safe",
+    annotations: mutating("Configure attribute reporting", { idempotent: true }),
     description:
       "Configure how often a device reports an attribute. Tightening intervals improves responsiveness; " +
       "loosening them saves battery. Set maximum_report_interval to 65535 to disable reporting. " +
-      "Battery devices must be woken immediately before calling this.",
+      "Battery devices must be woken immediately before calling this, and not all devices support the " +
+      "command. Use z2m_get_device to see existing configured_reportings, and z2m_configure_device to " +
+      "re-run the whole default configuration instead of one attribute.",
     inputSchema: {
       type: "object",
       properties: {
@@ -725,10 +813,13 @@ const fullTools: ToolDef[] = [
   {
     name: "z2m_remove_device",
     tier: "full",
+    annotations: mutating("Remove device from network", { destructive: true }),
     description:
-      "Remove a device from the Zigbee network. The coordinator can only ask a device to leave, so sleeping " +
-      "battery devices often fail. force=true deletes it from the database only, leaving it holding the " +
-      "network key until factory reset. Requires confirm=true.",
+      "Remove a device from the Zigbee network. IRREVERSIBLE: the device must be re-paired afterwards, and " +
+      "its automations and history references break. The coordinator can only ask a device to leave, so " +
+      "sleeping battery devices often fail unless woken. force=true deletes it from the database only, " +
+      "leaving it holding the network key until factory reset. Requires confirm=true. " +
+      "Prefer disabling a device in Zigbee2MQTT if you only want it to stop reporting.",
     inputSchema: {
       type: "object",
       properties: {
@@ -760,9 +851,12 @@ const fullTools: ToolDef[] = [
   {
     name: "z2m_ota_update",
     tier: "full",
+    annotations: mutating("Flash device firmware", { destructive: true }),
     description:
-      "Flash a device's firmware over the air. This can take many minutes, must not be interrupted, and can " +
-      "brick the device if it loses power. Check availability with z2m_check_updates first. Requires confirm=true.",
+      "Flash a device's firmware over the air. IRREVERSIBLE and high risk: it can take many minutes, must not " +
+      "be interrupted, and can brick the device if it loses power. Run z2m_check_updates first to confirm an " +
+      "update exists. Use action='schedule' to defer the flash until the device next checks in, which is " +
+      "safer for battery devices, and action='abort' to stop one in progress. Requires confirm=true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -797,9 +891,11 @@ const fullTools: ToolDef[] = [
   {
     name: "z2m_restart_bridge",
     tier: "full",
+    annotations: mutating("Restart Zigbee2MQTT", { destructive: true, idempotent: true }),
     description:
-      "Restart Zigbee2MQTT. Briefly interrupts all Zigbee control. Needed after changing options that report " +
-      "restart_required=true.",
+      "Restart Zigbee2MQTT. Briefly interrupts all Zigbee control and drops in-flight commands; the mesh " +
+      "itself is unaffected and devices reconnect automatically. Needed after changing options that report " +
+      "restart_required=true, which z2m_bridge_info also shows. Requires confirm=true.",
     inputSchema: {
       type: "object",
       properties: { confirm: { type: "boolean", description: "Must be true to proceed." } },
@@ -814,9 +910,13 @@ const fullTools: ToolDef[] = [
   {
     name: "z2m_set_bridge_options",
     tier: "full",
+    annotations: mutating("Change bridge configuration", { destructive: true, idempotent: true }),
     description:
-      "Change Zigbee2MQTT configuration at runtime, e.g. log level, availability or last_seen. " +
-      "The config schema is available via z2m_bridge_info with include_config=true. Some changes require a restart.",
+      "Change Zigbee2MQTT configuration at runtime, e.g. log level, availability or last_seen. Changes are " +
+      "written to the Zigbee2MQTT configuration and persist across restarts, so a bad value can affect the " +
+      "whole installation. Options are merged into the existing config. The config schema is available via " +
+      "z2m_bridge_info with include_config=true. Some changes report restart_required, which needs " +
+      "z2m_restart_bridge. Use z2m_set_device_options for a single device instead. Requires confirm=true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -837,10 +937,13 @@ const fullTools: ToolDef[] = [
   {
     name: "z2m_coordinator_check",
     tier: "full",
+    annotations: mutating("Check coordinator memory", { idempotent: true }),
     description:
       "Check whether any routers are missing from the coordinator's memory, which causes pairing failures and " +
-      "devices dropping off. Only supported on Texas Instruments adapters (CC2652/CC1352); other adapters " +
-      "will return an error.",
+      "devices dropping off. Changes nothing, but queries the coordinator directly. Only supported on Texas " +
+      "Instruments adapters (CC2652/CC1352); other adapters return an error — z2m_bridge_info reports whether " +
+      "yours qualifies under capabilities.coordinator_check. Returns {missing_routers[]}; an empty list is " +
+      "healthy. Use z2m_network_map for a topology view on any adapter.",
     inputSchema: EMPTY,
     handler: async (_args, ctx) => ctx.client.request("coordinator_check", {}, 60_000),
   },
@@ -848,9 +951,12 @@ const fullTools: ToolDef[] = [
   {
     name: "z2m_touchlink",
     tier: "full",
+    annotations: mutating("Touchlink scan, identify or reset", { destructive: true }),
     description:
-      "Touchlink scan, identify or factory reset. Factory reset affects the physically nearest Touchlink " +
-      "device, which may not be the one you intend. Requires confirm=true.",
+      "Touchlink scan, identify or factory reset. action='scan' and 'identify' are harmless; " +
+      "action='factory_reset' is IRREVERSIBLE and, without ieee_address and channel, affects the physically " +
+      "nearest Touchlink device, which may not be the one you intend — run 'scan' first and pass an explicit " +
+      "target. Use z2m_remove_device to remove a device already paired to this network. Requires confirm=true.",
     inputSchema: {
       type: "object",
       properties: {

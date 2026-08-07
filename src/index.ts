@@ -38,7 +38,12 @@ async function main(): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+    tools: tools.map(({ name, description, inputSchema, annotations }) => ({
+      name,
+      description,
+      inputSchema,
+      annotations,
+    })),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
