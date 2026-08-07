@@ -154,7 +154,16 @@ npm run watch
 # Manual smoke test against a real instance
 Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/smoke.mjs
 Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/smoke.mjs z2m_list_devices '{"only_problems":true}'
+
+# Sequential read-after-write test. Renames a device and creates a group, then
+# restores both, including on failure. Set Z2M_TEST_DEVICE to pick the device,
+# or ROUNDTRIP_GROUPS_ONLY=1 to skip the rename.
+Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/roundtrip.mjs
 ```
+
+Note that an MCP server may receive requests concurrently. When testing ordering,
+await each response before sending the next, as `roundtrip.mjs` does — piping
+several requests at once will produce misleading results.
 
 ## Safety
 
