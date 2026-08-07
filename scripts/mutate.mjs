@@ -195,6 +195,72 @@ const MUTANTS = [
     from: "if (parsed < 0) {",
     to: "if (false) {",
   },
+  {
+    name: "binds/clear reverts to the id key",
+    file: "src/tools.ts",
+    from: 'const clear: Record<string, unknown> = { target: String(args.from) };',
+    to: "const clear: Record<string, unknown> = { id: String(args.from) };",
+  },
+  {
+    name: "rename sends from and to swapped",
+    file: "src/tools.ts",
+    from: "        from: target.friendly_name,",
+    to: "        from: String(args.new_name),",
+  },
+  {
+    name: "touchlink accepts a half-specified target",
+    file: "src/tools.ts",
+    from: "if (hasAddress !== hasChannel) {",
+    to: "if (false) {",
+  },
+  {
+    name: "touchlink resets the nearest device unasked",
+    file: "src/tools.ts",
+    from: '} else if (action !== "scan" && args.nearest !== true) {',
+    to: "} else if (false) {",
+  },
+  {
+    name: "bind endpoints dropped",
+    file: "src/tools.ts",
+    from: "if (args.from_endpoint !== undefined) payload.from_endpoint = args.from_endpoint;",
+    to: "",
+  },
+  {
+    name: "group member endpoint dropped",
+    file: "src/tools.ts",
+    from: "            ...(args.endpoint !== undefined ? { endpoint: args.endpoint } : {}),\n          });\n        case \"remove_member\":",
+    to: "          });\n        case \"remove_member\":",
+  },
+  {
+    name: "numeric arguments unvalidated again",
+    file: "src/tools.ts",
+    from: "  if (!Number.isFinite(value)) {",
+    to: "  if (false) {",
+  },
+  {
+    name: "permit_join_end scaled by 1000 again",
+    file: "src/tools.ts",
+    from: "? new Date(Number(info.permit_join_end)).toISOString()",
+    to: "? new Date(Number(info.permit_join_end) * 1000).toISOString()",
+  },
+  {
+    name: "outbound errors no longer scrubbed",
+    file: "src/render.ts",
+    from: "return `${toolName} failed: ${scrubSecrets((error as Error).message, config)}`;",
+    to: "return `${toolName} failed: ${(error as Error).message}`;",
+  },
+  {
+    name: "oversized results no longer truncated",
+    file: "src/render.ts",
+    from: "if (text.length <= MAX_RESULT_BYTES) return text;",
+    to: "return text;",
+  },
+  {
+    name: "network map picks the worst parent",
+    file: "src/tools.ts",
+    from: "const best = inbound.sort((a, b) => (b.linkquality ?? 0) - (a.linkquality ?? 0))[0];",
+    to: "const best = inbound.sort((a, b) => (a.linkquality ?? 0) - (b.linkquality ?? 0))[0];",
+  },
 ];
 
 const filter = process.argv[2];

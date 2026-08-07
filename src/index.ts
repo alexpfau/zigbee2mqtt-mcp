@@ -5,7 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Z2MClient } from "./client.js";
 import { createLogger, loadConfig, type Config } from "./config.js";
-import { redactUrl, scrubSecrets } from "./redact.js";
+import { redactUrl } from "./redact.js";
+import { render, toolErrorText } from "./render.js";
 import { selectTools, type ToolContext } from "./tools.js";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -77,16 +78,12 @@ async function main(): Promise<void> {
     try {
       const result = await tool.handler(request.params.arguments ?? {}, ctx);
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, replacer, 2) }],
+        content: [{ type: "text" as const, text: render(result) }],
       };
     } catch (error) {
-      // mqtt.js quotes back whatever URL it was given, so never return a raw message.
-      const message = scrubSecrets((error as Error).message, config);
-      log.error(`${tool.name} failed:`, message);
-      return {
-        isError: true,
-        content: [{ type: "text" as const, text: `${tool.name} failed: ${message}` }],
-      };
+      const text = toolErrorText(tool.name, error, config);
+      log.error(text);
+      return { isError: true, content: [{ type: "text" as const, text }] };
     }
   });
 
@@ -104,10 +101,15 @@ async function main(): Promise<void> {
   log.info("ready on stdio");
 }
 
-/** Maps are used for the internal caches; render them as plain objects. */
-function replacer(_key: string, value: unknown): unknown {
-  return value instanceof Map ? Object.fromEntries(value) : value;
-}
+// A throw inside an event listener would otherwise kill the session with no
+// diagnostic on stderr, which is indistinguishable from a clean exit.
+process.on("unhandledRejection", (reason) => {
+  console.error(`[zigbee2mqtt-mcp] unhandled rejection: ${String(reason)}`);
+});
+process.on("uncaughtException", (error) => {
+  console.error(`[zigbee2mqtt-mcp] uncaught exception: ${error.message}`);
+  process.exit(1);
+});
 
 main().catch((error) => {
   console.error(`[zigbee2mqtt-mcp] fatal: ${(error as Error).message}`);

@@ -119,6 +119,12 @@ export class Z2MClient {
 
   async connect(): Promise<void> {
     if (this.client?.connected) return;
+    // A client that exists but is not connected is mid-reconnect. Dialling
+    // again would orphan it and flap the shared client ID on the broker.
+    if (this.client && !this.connectPromise) {
+      await this.awaitReconnect();
+      return;
+    }
     if (!this.connectPromise) {
       this.connectPromise = this.doConnect().finally(() => {
         this.connectPromise = null;
@@ -153,6 +159,7 @@ export class Z2MClient {
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         client.end(true);
         this.client = null;
         reject(error);
@@ -169,9 +176,13 @@ export class Z2MClient {
       });
 
       client.on("message", (topic, payload) => this.handleMessage(topic, payload));
+      client.on("close", () => this.log.debug("mqtt connection closed"));
+      client.on("reconnect", () => this.log.debug("mqtt reconnecting"));
 
-      client.on("connect", () => {
+      client.once("connect", () => {
         this.brokerHandshake = true;
+        // `once`: mqtt.js re-emits this on every reconnect, and a second
+        // waitForBridgeData poll would be pure dead work.
         this.log.debug("connected, subscribing");
         client.subscribe(`${config.baseTopic}/#`, { qos: 1 }, (error) => {
           if (error) {
@@ -190,6 +201,22 @@ export class Z2MClient {
         });
       });
     });
+  }
+
+  /** Lets mqtt.js finish its own reconnect instead of opening a rival client. */
+  private async awaitReconnect(): Promise<void> {
+    const deadline = Date.now() + this.config.connectTimeoutMs;
+    while (Date.now() < deadline) {
+      if (this.client?.connected) return;
+      if (!this.client) break;
+      await sleep(100);
+    }
+    if (!this.client?.connected) {
+      throw new Error(
+        `Lost the connection to ${this.safeUrl} and it has not come back within ` +
+          `${this.config.connectTimeoutMs}ms. Check that the broker is reachable.`,
+      );
+    }
   }
 
   private async waitForBridgeData(timeoutMs = 5_000): Promise<void> {
@@ -277,6 +304,7 @@ export class Z2MClient {
         if (route.name.startsWith("request/")) return;
         this.bridge.set(route.name, parsed ?? raw);
         this.bridgeRevision++;
+        if (route.name === "devices") this.pruneStaleState();
         return;
 
       case "availability": {
@@ -304,6 +332,18 @@ export class Z2MClient {
         void unhandled;
       }
     }
+  }
+
+  /**
+   * Renames and removals would otherwise leave their old keys behind forever,
+   * and these two maps are the only caches without a bound.
+   */
+  private pruneStaleState(): void {
+    const devices = this.bridge.get("devices") as { friendly_name?: string }[] | undefined;
+    if (!Array.isArray(devices) || devices.length === 0) return;
+    const known = new Set(devices.map((d) => d.friendly_name).filter((n): n is string => typeof n === "string"));
+    for (const name of this.deviceState.keys()) if (!known.has(name)) this.deviceState.delete(name);
+    for (const name of this.availability.keys()) if (!known.has(name)) this.availability.delete(name);
   }
 
   private resolveWaiter(subTopic: string, parsed: unknown): void {
@@ -389,9 +429,23 @@ export class Z2MClient {
     if (!client) throw new Error("MQTT client is not connected");
     const body = typeof payload === "string" ? payload : JSON.stringify(payload);
     return new Promise((resolve, reject) => {
-      client.publish(topic, body, { qos: 1 }, (error) =>
-        error ? reject(new Error(`Failed to publish to ${topic}: ${error.message}`)) : resolve(),
+      // Settles only on the QoS 1 acknowledgement, which never arrives if the
+      // broker drops mid-publish, so bound it like request() does.
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `Timed out after ${this.config.requestTimeoutMs}ms publishing to ${topic}. ` +
+                "The message may still be queued for delivery.",
+            ),
+          ),
+        this.config.requestTimeoutMs,
       );
+      client.publish(topic, body, { qos: 1 }, (error) => {
+        clearTimeout(timer);
+        if (error) reject(new Error(`Failed to publish to ${topic}: ${error.message}`));
+        else resolve();
+      });
     });
   }
 

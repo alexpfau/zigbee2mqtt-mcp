@@ -78,7 +78,7 @@ const DEVICE_ID = {
 
 async function loadDevices(ctx: ToolContext, collectSeconds?: number) {
   if (collectSeconds) {
-    await ctx.client.collectState(Math.min(Number(collectSeconds), 120) * 1000);
+    await ctx.client.collectState(num({ collect_seconds: collectSeconds }, "collect_seconds", { min: 1, max: 120 }) * 1000);
   }
   const snap = await ctx.client.snapshot();
   const raw = (snap.devices as RawDevice[]).filter((d) => !isCoordinator(d));
@@ -118,6 +118,30 @@ export function findRaw(raw: RawDevice[], id: string): RawDevice {
   throw new Error(`No device matches '${id}'. Use z2m_list_devices to see available devices.`);
 }
 
+/**
+ * Number("ten") is NaN, which silently becomes slice(0, NaN) or setTimeout(0)
+ * rather than an error a model can correct.
+ */
+function num(
+  args: Record<string, any>,
+  name: string,
+  { min = 0, max = Number.MAX_SAFE_INTEGER, fallback }: { min?: number; max?: number; fallback?: number } = {},
+): number {
+  const raw = args[name];
+  if (raw === undefined || raw === "") {
+    if (fallback !== undefined) return fallback;
+    throw new Error(`${name} is required.`);
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be a number, got ${JSON.stringify(raw)}.`);
+  }
+  if (value < min || value > max) {
+    throw new Error(`${name} must be between ${min} and ${max}, got ${value}.`);
+  }
+  return value;
+}
+
 function requireConfirm(args: Record<string, any>, action: string): void {
   if (args.confirm !== true) {
     throw new Error(`${action} is irreversible or disruptive. Re-run with confirm=true to proceed.`);
@@ -133,7 +157,17 @@ function summariseExposes(exposes: unknown[] | undefined): string[] {
       if (node.type && !node.property) out.push(`${node.type}`);
       return;
     }
-    if (node.property) out.push(`${node.property}:${node.type ?? "unknown"}`);
+    if (node.property) {
+      // The description tells the model to use this to discover valid
+      // values, so a bare type is not enough.
+      const bounds =
+        node.type === "enum" && Array.isArray(node.values)
+          ? ` [${node.values.join("|")}]`
+          : node.value_min !== undefined || node.value_max !== undefined
+            ? ` [${node.value_min ?? "?"}..${node.value_max ?? "?"}${node.unit ? " " + node.unit : ""}]`
+            : "";
+      out.push(`${node.property}:${node.type ?? "unknown"}${bounds}`);
+    }
   };
   for (const expose of exposes ?? []) walk(expose);
   return [...new Set(out)];
@@ -239,7 +273,7 @@ const readTools: ToolDef[] = [
         network: info.network,
         permit_join: info.permit_join,
         permit_join_end: info.permit_join_end
-          ? new Date(Number(info.permit_join_end) * 1000).toISOString()
+          ? new Date(Number(info.permit_join_end)).toISOString()
           : undefined,
         log_level: info.log_level,
         restart_required: info.restart_required,
@@ -342,7 +376,7 @@ const readTools: ToolDef[] = [
       });
 
       const total = list.length;
-      if (args.limit) list = list.slice(0, Number(args.limit));
+      list = list.slice(0, num(args, "limit", { min: 1, max: 1000, fallback: 100 }));
 
       return { total, returned: list.length, capabilities, devices: list };
     },
@@ -442,18 +476,21 @@ const readTools: ToolDef[] = [
         include_routes: { type: "boolean", description: "Include active routes. Slower. Default false." },
         raw: { type: "boolean", description: "Return the unsummarised graph. Default false." },
         timeout_ms: { type: "number", description: "Scan timeout. Default 180000." },
+        max_nodes: { type: "number", description: "Cap the nodes returned. Default 200." },
       },
     },
     handler: async (args, ctx) => {
       const data = await ctx.client.request<any>(
         "networkmap",
         { type: "raw", routes: args.include_routes === true },
-        Number(args.timeout_ms ?? 180_000),
+        num(args, "timeout_ms", { min: 1_000, max: 600_000, fallback: 180_000 }),
       );
       const value = data?.value ?? data;
       if (args.raw) return value;
 
-      const nodes: any[] = value?.nodes ?? [];
+      const allNodes: any[] = value?.nodes ?? [];
+      const maxNodes = num(args, "max_nodes", { min: 1, max: 1000, fallback: 200 });
+      const nodes = allNodes.slice(0, maxNodes);
       const links: any[] = value?.links ?? [];
       const byAddress = new Map<string, any>(nodes.map((n) => [n.ieeeAddr, n]));
 
@@ -532,7 +569,7 @@ const readTools: ToolDef[] = [
       const min = args.level ? rank[String(args.level)] ?? 0 : 0;
 
       let lines = args.watch_seconds
-        ? await ctx.client.collectLogs(Math.min(Number(args.watch_seconds), 120) * 1000)
+        ? await ctx.client.collectLogs(num(args, "watch_seconds", { min: 1, max: 120 }) * 1000)
         : [...ctx.client.recentLogs()];
 
       lines = lines.filter((l) => (rank[l.level] ?? 1) >= min);
@@ -540,7 +577,7 @@ const readTools: ToolDef[] = [
         const needle = String(args.contains).toLowerCase();
         lines = lines.filter((l) => l.message.toLowerCase().includes(needle));
       }
-      const limit = Number(args.limit ?? 100);
+      const limit = num(args, "limit", { min: 1, max: 1000, fallback: 100 });
 
       return {
         note: ctx.client.recentLogs().length === 0 && !args.watch_seconds
@@ -583,14 +620,30 @@ const safeTools: ToolDef[] = [
       properties: {
         device: { ...DEVICE_ID, description: "Check a single device. Omit to check all mains-powered devices." },
         timeout_ms: { type: "number", description: "Per-device timeout. Default 60000." },
+        max_devices: {
+          type: "number",
+          description: "Stop after this many devices so the call returns before a client times out. Default 10.",
+        },
+        offset: { type: "number", description: "Skip this many devices, to continue a previous sweep." },
       },
     },
     handler: async (args, ctx) => {
       const { raw } = await loadDevices(ctx);
-      const timeout = Number(args.timeout_ms ?? 60_000);
-      const targets = args.device
+      const timeout = num(args, "timeout_ms", { min: 1_000, max: 600_000, fallback: 60_000 });
+      // Mains-powered covers routers and anything else Zigbee2MQTT reports
+      // as mains powered; battery devices sleep and would just time out.
+      const candidates = args.device
         ? [findRaw(raw, String(args.device))]
-        : raw.filter((d) => d.disabled !== true && d.type === "Router");
+        : raw.filter(
+            (d) =>
+              d.disabled !== true &&
+              (d.type === "Router" || (d.power_source ?? "").toLowerCase() === "mains (single phase)"),
+          );
+
+      const offset = num(args, "offset", { fallback: 0 });
+      const maxDevices = num(args, "max_devices", { min: 1, max: 100, fallback: 10 });
+      const targets = candidates.slice(offset, offset + maxDevices);
+      const remaining = Math.max(0, candidates.length - (offset + targets.length));
 
       const results: unknown[] = [];
       for (const target of targets) {
@@ -605,7 +658,13 @@ const safeTools: ToolDef[] = [
           results.push({ device: target.friendly_name, error: (error as Error).message });
         }
       }
-      return { checked: results.length, results };
+      return {
+        checked: results.length,
+        total_candidates: candidates.length,
+        remaining,
+        ...(remaining > 0 ? { next_offset: offset + targets.length } : {}),
+        results,
+      };
     },
   },
 
@@ -633,7 +692,7 @@ const safeTools: ToolDef[] = [
       required: ["time"],
     },
     handler: async (args, ctx) => {
-      const payload: Record<string, unknown> = { time: Number(args.time) };
+      const payload: Record<string, unknown> = { time: num(args, "time", { min: 0, max: 254 }) };
       if (args.device) payload.device = String(args.device);
       return ctx.client.request("permit_join", payload);
     },
@@ -786,7 +845,11 @@ const safeTools: ToolDef[] = [
         group: { type: "string", description: "Group friendly_name or numeric ID." },
         new_name: { type: "string", description: "Required for action=rename." },
         id: { type: "number", description: "Optional numeric ID for action=add." },
-        device: { type: "string", description: "Device for member actions. Append /ENDPOINT to target an endpoint." },
+        device: { type: "string", description: "Device for member actions." },
+        endpoint: {
+          type: ["string", "number"],
+          description: "Endpoint for member actions, e.g. 'l1' or 1. Defaults to the device's default endpoint.",
+        },
         force: { type: "boolean", description: "Force removal even if a member device is unreachable." },
         confirm: { type: "boolean", description: "Required for action=remove and action=remove_all_members." },
       },
@@ -798,7 +861,7 @@ const safeTools: ToolDef[] = [
         case "add":
           return ctx.client.request("group/add", {
             friendly_name: group,
-            ...(args.id !== undefined ? { id: Number(args.id) } : {}),
+            ...(args.id !== undefined ? { id: num(args, "id", { min: 1, max: 65_535 }) } : {}),
           });
         case "remove":
           requireConfirm(args, `Removing group '${group}'`);
@@ -808,10 +871,18 @@ const safeTools: ToolDef[] = [
           return ctx.client.request("group/rename", { from: group, to: String(args.new_name) });
         case "add_member":
           if (!args.device) throw new Error("device is required for action=add_member");
-          return ctx.client.request("group/members/add", { group, device: String(args.device) });
+          return ctx.client.request("group/members/add", {
+            group,
+            device: String(args.device),
+            ...(args.endpoint !== undefined ? { endpoint: args.endpoint } : {}),
+          });
         case "remove_member":
           if (!args.device) throw new Error("device is required for action=remove_member");
-          return ctx.client.request("group/members/remove", { group, device: String(args.device) });
+          return ctx.client.request("group/members/remove", {
+            group,
+            device: String(args.device),
+            ...(args.endpoint !== undefined ? { endpoint: args.endpoint } : {}),
+          });
         case "remove_all_members":
           requireConfirm(args, `Removing every member of group '${group}'`);
           return ctx.client.request("group/members/remove_all", { group });
@@ -830,18 +901,31 @@ const safeTools: ToolDef[] = [
       "control a light directly over Zigbee without a round trip through the coordinator, so it keeps working " +
       "even if the bridge is down. Reversible with action='unbind'; action='clear' removes all binds from the " +
       "source device at once and needs confirm=true, because the previous set cannot be recovered. " +
-      "Append /ENDPOINT to target a specific endpoint, e.g. 'my_remote/left' — check " +
-      "z2m_get_device endpoints first. Both devices must be awake.",
+      "To target one button of a multi-button remote, pass from_endpoint and to_endpoint as separate " +
+      "arguments — check z2m_get_device endpoints first. Both devices must be awake.",
     inputSchema: {
       type: "object",
       properties: {
         action: { type: "string", enum: ["bind", "unbind", "clear"] },
-        from: { type: "string", description: "Source device, optionally with /ENDPOINT." },
+        from: { type: "string", description: "Source device friendly_name or ieee_address." },
         to: { type: "string", description: "Target device or group. Not needed for action=clear." },
+        from_endpoint: {
+          type: ["string", "number"],
+          description: "Source endpoint, e.g. 'left' or 1. Defaults to the device's default endpoint.",
+        },
+        to_endpoint: {
+          type: ["string", "number"],
+          description: "Target endpoint. Only meaningful when the target is a device, not a group.",
+        },
         clusters: {
           type: "array",
           items: { type: "string" },
           description: "Clusters to bind, e.g. ['genOnOff','genLevelCtrl']. Omit to bind all supported clusters.",
+        },
+        ieee_list: {
+          type: "array",
+          items: { type: "string" },
+          description: "For action=clear: specific bind targets to remove. Omit to clear every binding.",
         },
         confirm: { type: "boolean", description: "Required for action=clear." },
       },
@@ -850,10 +934,15 @@ const safeTools: ToolDef[] = [
     handler: async (args, ctx) => {
       if (args.action === "clear") {
         requireConfirm(args, `Clearing every binding from '${String(args.from)}'`);
-        return ctx.client.request("device/binds/clear", { id: String(args.from) }, 60_000);
+        // Zigbee2MQTT rejects anything without a string `target` as "Invalid payload".
+        const clear: Record<string, unknown> = { target: String(args.from) };
+        if (Array.isArray(args.ieee_list) && args.ieee_list.length > 0) clear.ieee_list = args.ieee_list;
+        return ctx.client.request("device/binds/clear", clear, 60_000);
       }
       if (!args.to) throw new Error("'to' is required for bind and unbind");
       const payload: Record<string, unknown> = { from: String(args.from), to: String(args.to) };
+      if (args.from_endpoint !== undefined) payload.from_endpoint = args.from_endpoint;
+      if (args.to_endpoint !== undefined) payload.to_endpoint = args.to_endpoint;
       if (Array.isArray(args.clusters) && args.clusters.length > 0) payload.clusters = args.clusters;
       return ctx.client.request(args.action === "bind" ? "device/bind" : "device/unbind", payload, 60_000);
     },
@@ -889,12 +978,14 @@ const safeTools: ToolDef[] = [
         "device/reporting/configure",
         {
           id: target.friendly_name,
-          endpoint: Number(args.endpoint ?? 1),
+          endpoint: num(args, "endpoint", { min: 1, max: 255, fallback: 1 }),
           cluster: String(args.cluster),
           attribute: String(args.attribute),
-          minimum_report_interval: Number(args.minimum_report_interval),
-          maximum_report_interval: Number(args.maximum_report_interval),
-          ...(args.reportable_change !== undefined ? { reportable_change: Number(args.reportable_change) } : {}),
+          minimum_report_interval: num(args, "minimum_report_interval", { max: 65_535 }),
+          maximum_report_interval: num(args, "maximum_report_interval", { max: 65_535 }),
+          ...(args.reportable_change !== undefined
+            ? { reportable_change: num(args, "reportable_change") }
+            : {}),
         },
         60_000,
       );
@@ -921,7 +1012,6 @@ const fullTools: ToolDef[] = [
         device: DEVICE_ID,
         force: { type: "boolean", description: "Delete from the database even if the device does not respond." },
         block: { type: "boolean", description: "Prevent the device from rejoining." },
-        clear_cache: { type: "boolean", description: "Discard cached data so a rejoin re-interviews from scratch." },
         confirm: { type: "boolean", description: "Must be true to proceed." },
       },
       required: ["device", "confirm"],
@@ -936,7 +1026,6 @@ const fullTools: ToolDef[] = [
           id: target.friendly_name,
           force: args.force === true,
           block: args.block === true,
-          clear_cache: args.clear_cache === true,
         },
         60_000,
       );
@@ -979,7 +1068,8 @@ const fullTools: ToolDef[] = [
             : action === "unschedule"
               ? "device/ota_update/unschedule"
               : "device/ota_update/update";
-      return ctx.client.request(topic, { id: target.friendly_name }, Number(args.timeout_ms ?? 1_800_000));
+      const timeoutMs = num(args, "timeout_ms", { min: 1_000, max: 3_600_000, fallback: 1_800_000 });
+      return ctx.client.request(topic, { id: target.friendly_name }, timeoutMs);
     },
   },
 
@@ -1035,26 +1125,53 @@ const fullTools: ToolDef[] = [
     annotations: mutating("Touchlink scan, identify or reset", { destructive: true }),
     description:
       "Touchlink scan, identify or factory reset. action='scan' and 'identify' are harmless; " +
-      "action='factory_reset' is IRREVERSIBLE and, without ieee_address and channel, affects the physically " +
-      "nearest Touchlink device, which may not be the one you intend — run 'scan' first and pass an explicit " +
-      "target. Use z2m_remove_device to remove a device already paired to this network. Requires confirm=true.",
+      "action='factory_reset' is IRREVERSIBLE. Pass both ieee_address and channel to target a device, and " +
+      "run 'scan' first to discover them. Supplying only one is rejected rather than falling back. Set " +
+      "nearest=true to act on whichever Touchlink device is physically closest, which may not be the one " +
+      "you intend. Use z2m_remove_device for a device already paired to this network. Requires confirm=true.",
     inputSchema: {
       type: "object",
       properties: {
         action: { type: "string", enum: ["scan", "identify", "factory_reset"] },
-        ieee_address: { type: "string", description: "Required for identify and targeted factory_reset." },
-        channel: { type: "number", description: "Required for identify and targeted factory_reset." },
+        ieee_address: { type: "string", description: "Target address. Required together with channel." },
+        channel: { type: "number", description: "Target channel. Required together with ieee_address." },
+        nearest: {
+          type: "boolean",
+          description: "Act on the physically nearest device instead of a named target.",
+        },
         confirm: { type: "boolean", description: "Must be true to proceed." },
       },
       required: ["action", "confirm"],
     },
     handler: async (args, ctx) => {
       requireConfirm(args, "Touchlink");
-      const payload =
-        args.ieee_address && args.channel !== undefined
-          ? { ieee_address: String(args.ieee_address), channel: Number(args.channel) }
-          : {};
-      return ctx.client.request(`touchlink/${String(args.action)}`, payload, 120_000);
+      const action = String(args.action);
+      const hasAddress = args.ieee_address !== undefined && String(args.ieee_address) !== "";
+      const hasChannel = args.channel !== undefined;
+
+      // Zigbee2MQTT treats an empty payload as "act on the first device found",
+      // so a half-specified target must never fall through to it.
+      if (hasAddress !== hasChannel) {
+        throw new Error(
+          `Touchlink ${action} needs both ieee_address and channel, or neither. ` +
+            `Run action='scan' to discover the ${hasAddress ? "channel" : "address"}.`,
+        );
+      }
+
+      let payload: Record<string, unknown> = {};
+      if (hasAddress) {
+        if (args.nearest === true) {
+          throw new Error("Pass either ieee_address with channel, or nearest=true, not both.");
+        }
+        payload = { ieee_address: String(args.ieee_address), channel: num(args, "channel") };
+      } else if (action !== "scan" && args.nearest !== true) {
+        throw new Error(
+          `Touchlink ${action} without a target acts on the physically nearest device and cannot be ` +
+            "undone. Pass ieee_address and channel, or set nearest=true to accept that.",
+        );
+      }
+
+      return ctx.client.request(`touchlink/${action}`, payload, 120_000);
     },
   },
 ];
