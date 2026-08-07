@@ -1,0 +1,54 @@
+name: Publish
+
+# Publishes to npm via trusted publishing (OIDC). No NPM_TOKEN secret is needed:
+# npm exchanges the workflow's short-lived OIDC token for a scoped publish token.
+# The trusted publisher on npmjs.com must reference this exact filename.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - run: npm run build
+
+      - name: Verify tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v$tag does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Verify the tarball carries no local network details
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          if grep -rIqE '(^|[^0-9])(10\.255\.255\.255|private-registry\.invalid)' dist README.md; then
+            echo "Refusing to publish: build output references a private host" >&2
+            exit 1
+          fi
+
+      - run: npm publish
