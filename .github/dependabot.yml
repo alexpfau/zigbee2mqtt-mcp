@@ -7,6 +7,11 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+    ignore:
+      # Types must track the oldest Node in `engines`, not the newest release, or
+      # the compiler stops catching use of APIs that minimum does not have.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -15,3 +20,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Odd-numbered Node majors never reach LTS, so an automatic major bump can
+      # land the image on a line that is already end-of-life. Bump by hand.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
