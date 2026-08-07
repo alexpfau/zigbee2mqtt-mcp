@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Z2MClient } from "./client.js";
 import { createLogger, loadConfig, type Config } from "./config.js";
+import { redactUrl, scrubSecrets } from "./redact.js";
 import { selectTools, type ToolContext } from "./tools.js";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
 
   log.info(
     `write mode '${config.writeMode}' exposes ${tools.length} tools against ` +
-      `${config.mqttUrl} (base topic '${config.baseTopic}')`,
+      `${redactUrl(config.mqttUrl)} (base topic '${config.baseTopic}')`,
   );
 
   const server = new Server(
@@ -76,10 +77,12 @@ async function main(): Promise<void> {
         content: [{ type: "text" as const, text: JSON.stringify(result, replacer, 2) }],
       };
     } catch (error) {
-      log.error(`${tool.name} failed:`, (error as Error).message);
+      // mqtt.js quotes back whatever URL it was given, so never return a raw message.
+      const message = scrubSecrets((error as Error).message, config);
+      log.error(`${tool.name} failed:`, message);
       return {
         isError: true,
-        content: [{ type: "text" as const, text: `${tool.name} failed: ${(error as Error).message}` }],
+        content: [{ type: "text" as const, text: `${tool.name} failed: ${message}` }],
       };
     }
   });

@@ -1,5 +1,7 @@
 import mqtt, { type IClientOptions, type MqttClient } from "mqtt";
 import type { Config, Logger } from "./config.js";
+import { redactUrl, scrubSecrets } from "./redact.js";
+import { classifyTopic } from "./topics.js";
 
 export interface BridgeResponse<T = unknown> {
   status: "ok" | "error";
@@ -19,6 +21,46 @@ export interface BridgeEvent {
   received_at: string;
   type: string;
   data: Record<string, unknown>;
+}
+
+/**
+ * Correlates bridge/request with bridge/response. Both sides must build the key
+ * identically or every write tool times out, so it lives in one place.
+ */
+export function waiterKey(subTopic: string, transaction: string | number | undefined): string {
+  return `${subTopic}|${transaction ?? ""}`;
+}
+
+/**
+ * The broker accepted the connection but published no Zigbee2MQTT bridge data.
+ * Distinguished from a connection failure because the remedy is different: the
+ * base topic is wrong, or Zigbee2MQTT is not running against this broker.
+ */
+export class NoBridgeDataError extends Error {
+  readonly name = "NoBridgeDataError";
+}
+
+export interface ConnectionStatus {
+  connected: boolean;
+  broker_url: string;
+  base_topic: string;
+  client_id: string;
+  write_mode: string;
+  tls: {
+    enabled: boolean;
+    reject_unauthorized: boolean;
+    custom_ca: boolean;
+    client_certificate: boolean;
+  };
+  authenticated: boolean;
+  cached: {
+    bridge_topics: number;
+    device_state: number;
+    availability: number;
+    logs: number;
+    events: number;
+  };
+  last_message_at: string | null;
 }
 
 const LOG_BUFFER = 1000;
@@ -60,10 +102,15 @@ export class Z2MClient {
   private readonly events: BridgeEvent[] = [];
   private readonly waiters = new Map<string, (response: BridgeResponse) => void>();
 
+  /** Never interpolate config.mqttUrl into a message; it may carry credentials. */
+  private readonly safeUrl: string;
+
   constructor(
     private readonly config: Config,
     private readonly log: Logger,
-  ) {}
+  ) {
+    this.safeUrl = redactUrl(config.mqttUrl);
+  }
 
   // ---------------------------------------------------------------- lifecycle
 
@@ -95,7 +142,7 @@ export class Z2MClient {
     };
 
     return new Promise((resolve, reject) => {
-      this.log.debug(`connecting to ${config.mqttUrl}`);
+      this.log.debug(`connecting to ${this.safeUrl}`);
       const client = mqtt.connect(config.mqttUrl, options);
       this.client = client;
 
@@ -109,13 +156,13 @@ export class Z2MClient {
       };
 
       const timer = setTimeout(
-        () => fail(new Error(`Timed out connecting to ${config.mqttUrl} after ${config.connectTimeoutMs}ms`)),
+        () => fail(new Error(`Timed out connecting to ${this.safeUrl} after ${config.connectTimeoutMs}ms`)),
         config.connectTimeoutMs,
       );
 
       client.on("error", (error) => {
-        this.log.error("mqtt error:", error.message);
-        fail(new Error(`MQTT connection to ${config.mqttUrl} failed: ${error.message}`));
+        this.log.error("mqtt error:", scrubSecrets(error.message, config));
+        fail(new Error(`MQTT connection to ${this.safeUrl} failed: ${scrubSecrets(error.message, config)}`));
       });
 
       client.on("message", (topic, payload) => this.handleMessage(topic, payload));
@@ -147,7 +194,7 @@ export class Z2MClient {
       await sleep(25);
     }
     if (!this.bridge.has("devices")) {
-      throw new Error(
+      throw new NoBridgeDataError(
         `Connected to the broker but received no retained '${this.config.baseTopic}/bridge/devices' ` +
           `message within ${timeoutMs}ms. Check that Zigbee2MQTT is running and that Z2M_BASE_TOPIC ` +
           `(currently '${this.config.baseTopic}') matches its mqtt.base_topic setting.`,
@@ -179,68 +226,73 @@ export class Z2MClient {
 
   // ----------------------------------------------------------------- messages
 
-  private handleMessage(topic: string, payload: Buffer): void {
-    const prefix = `${this.config.baseTopic}/`;
-    if (!topic.startsWith(prefix)) return;
+  /** Exposed for tests; the live path is the client's 'message' event. */
+  handleMessage(topic: string, payload: Buffer): void {
+    const route = classifyTopic(this.config.baseTopic, topic);
+    if (route.kind === "foreign") return;
     this.lastMessageAt = Date.now();
-    const rest = topic.slice(prefix.length);
     const raw = payload.toString();
     const parsed = safeParse(raw);
 
-    if (rest.startsWith("bridge/response/")) {
-      this.resolveWaiter(rest.slice("bridge/response/".length), parsed);
-      return;
-    }
-    if (rest === "bridge/logging") {
-      const entry = parsed as Partial<LogEntry> | null;
-      if (entry && typeof entry === "object") {
-        push(this.logs, LOG_BUFFER, {
-          received_at: new Date().toISOString(),
-          level: String(entry.level ?? "info"),
-          message: String(entry.message ?? raw),
-          namespace: entry.namespace,
-        });
-      }
-      return;
-    }
-    if (rest === "bridge/event") {
-      const event = parsed as { type?: string; data?: Record<string, unknown> } | null;
-      if (event && typeof event === "object") {
-        push(this.events, EVENT_BUFFER, {
-          received_at: new Date().toISOString(),
-          type: String(event.type ?? "unknown"),
-          data: event.data ?? {},
-        });
-      }
-      return;
-    }
-    if (rest.startsWith("bridge/")) {
-      this.bridge.set(rest.slice("bridge/".length), parsed ?? raw);
-      this.bridgeRevision++;
-      return;
-    }
+    switch (route.kind) {
+      case "response":
+        this.resolveWaiter(route.subTopic, parsed);
+        return;
 
-    // Friendly names may contain '/', so match on the suffix rather than splitting.
-    if (rest.endsWith("/availability")) {
-      const name = rest.slice(0, -"/availability".length);
-      const state = typeof parsed === "object" && parsed !== null
-        ? String((parsed as { state?: unknown }).state ?? raw)
-        : raw;
-      this.availability.set(name, state);
-      return;
-    }
-    if (/\/(set|get)(\/|$)/.test(rest)) return; // commands, not state
+      case "logging": {
+        const entry = parsed as Partial<LogEntry> | null;
+        if (entry && typeof entry === "object") {
+          push(this.logs, LOG_BUFFER, {
+            received_at: new Date().toISOString(),
+            level: String(entry.level ?? "info"),
+            message: String(entry.message ?? raw),
+            namespace: entry.namespace,
+          });
+        }
+        return;
+      }
 
-    if (parsed && typeof parsed === "object") {
-      this.deviceState.set(rest, parsed as Record<string, unknown>);
+      case "event": {
+        const event = parsed as { type?: string; data?: Record<string, unknown> } | null;
+        if (event && typeof event === "object") {
+          push(this.events, EVENT_BUFFER, {
+            received_at: new Date().toISOString(),
+            type: String(event.type ?? "unknown"),
+            data: event.data ?? {},
+          });
+        }
+        return;
+      }
+
+      case "bridge":
+        this.bridge.set(route.name, parsed ?? raw);
+        this.bridgeRevision++;
+        return;
+
+      case "availability": {
+        const state =
+          typeof parsed === "object" && parsed !== null
+            ? String((parsed as { state?: unknown }).state ?? raw)
+            : raw;
+        this.availability.set(route.device, state);
+        return;
+      }
+
+      case "command":
+        return;
+
+      case "state":
+        if (parsed && typeof parsed === "object") {
+          this.deviceState.set(route.device, parsed as Record<string, unknown>);
+        }
+        return;
     }
   }
 
   private resolveWaiter(subTopic: string, parsed: unknown): void {
     if (!parsed || typeof parsed !== "object") return;
     const response = parsed as BridgeResponse;
-    const key = `${subTopic}|${response.transaction ?? ""}`;
-    const waiter = this.waiters.get(key);
+    const waiter = this.waiters.get(waiterKey(subTopic, response.transaction));
     if (waiter) waiter(response);
   }
 
@@ -261,7 +313,7 @@ export class Z2MClient {
 
     const timeout = timeoutMs ?? this.config.requestTimeoutMs;
     const transaction = `mcp-${++this.transactionCounter}`;
-    const key = `${subTopic}|${transaction}`;
+    const key = waiterKey(subTopic, transaction);
     const revisionBefore = this.bridgeRevision;
 
     const result = await new Promise<T>((resolve, reject) => {
@@ -343,6 +395,35 @@ export class Z2MClient {
       groups: (this.bridge.get("groups") as unknown[] | undefined) ?? [],
       deviceState: this.deviceState,
       availability: this.availability,
+    };
+  }
+
+  /**
+   * Deliberately does not connect: this is what a caller reaches for when the
+   * connection is the thing under suspicion.
+   */
+  status(): ConnectionStatus {
+    return {
+      connected: this.client?.connected === true,
+      broker_url: this.safeUrl,
+      base_topic: this.config.baseTopic,
+      client_id: this.config.clientId,
+      write_mode: this.config.writeMode,
+      tls: {
+        enabled: /^(mqtts|wss):/.test(this.config.mqttUrl),
+        reject_unauthorized: this.config.rejectUnauthorized,
+        custom_ca: this.config.ca !== undefined,
+        client_certificate: this.config.cert !== undefined,
+      },
+      authenticated: this.config.username !== undefined,
+      cached: {
+        bridge_topics: this.bridge.size,
+        device_state: this.deviceState.size,
+        availability: this.availability.size,
+        logs: this.logs.length,
+        events: this.events.length,
+      },
+      last_message_at: this.lastMessageAt ? new Date(this.lastMessageAt).toISOString() : null,
     };
   }
 

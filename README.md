@@ -98,16 +98,18 @@ Tools above the active tier are not registered at all, so a model cannot reach f
 | `safe` | **Default.** Read plus non-destructive writes: pairing, options, rename, configure, interview, binding, reporting, groups, state |
 | `full` | Everything, including device removal, OTA flashing, Touchlink and bridge restart |
 
-Irreversible tools (`z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`) additionally require `confirm: true` on every call.
+Irreversible tools (`z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`) additionally require `confirm: true` on every call. Three `safe` tools reduce state rather than only adding to it, so they are annotated destructive and the reducing actions also require `confirm: true`: `z2m_manage_group` (`remove`, `remove_all_members`) and `z2m_bind` (`clear`). `z2m_rename_device` is annotated destructive because it breaks anything referencing the old name, but stays unconfirmed since renaming back restores it.
 
 Every tool also advertises MCP [tool annotations](https://modelcontextprotocol.io/specification/server/tools) so a client can decide what may run without prompting:
 
 | Annotation | Meaning here |
 | --- | --- |
-| `readOnlyHint: true` | The seven read tools. They never change the network. |
-| `destructiveHint: true` | `z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options` |
+| `readOnlyHint: true` | The nine read tools. They never change the network. |
+| `destructiveHint: true` | `z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`, plus `z2m_rename_device`, `z2m_manage_group` and `z2m_bind` |
 | `idempotentHint` | True where repeating the call has no additional effect |
 | `openWorldHint: true` | Always — every tool reaches a live Zigbee network |
+
+Annotations describe the tool, not the tier: a `safe` tool can still be destructive. The tier decides what is registered, the annotation tells the client what to ask about.
 
 Opt in to the destructive tier only when you want it:
 
@@ -121,6 +123,7 @@ Opt in to the destructive tier only when you want it:
 
 | Tool | Purpose |
 | --- | --- |
+| `z2m_connection_status` | Broker reachability, TLS posture and cached message counts — reports instead of throwing when the connection is down |
 | `z2m_bridge_info` | Version, coordinator, channel, PAN ID, permit_join, restart_required, runtime stats |
 | `z2m_list_devices` | Filter and sort devices by type, availability, link quality, battery, pending update |
 | `z2m_get_device` | Exposes, settable options, endpoints, bindings, configured reportings, current state |
@@ -128,6 +131,7 @@ Opt in to the destructive tier only when you want it:
 | `z2m_network_map` | Mesh topology with parent, depth, link quality, orphan detection |
 | `z2m_list_groups` | Groups, members and scenes |
 | `z2m_get_logs` | Bridge logs and lifecycle events, buffered or watched live |
+| `z2m_coordinator_check` | Routers missing from the coordinator's memory (Texas Instruments adapters only) |
 
 ### Safe writes
 
@@ -135,7 +139,7 @@ Opt in to the destructive tier only when you want it:
 
 ### Full writes
 
-`z2m_remove_device`, `z2m_ota_update`, `z2m_restart_bridge`, `z2m_set_bridge_options`, `z2m_coordinator_check`, `z2m_touchlink`
+`z2m_remove_device`, `z2m_ota_update`, `z2m_restart_bridge`, `z2m_set_bridge_options`, `z2m_touchlink`
 
 ## Data availability caveats
 
@@ -147,6 +151,12 @@ Some fields depend on your Zigbee2MQTT configuration. The server detects what is
 | `availability` | `availability.enabled: true` | Offline detection is skipped and a hint is returned |
 | `linkquality`, `battery`, `update` | Live device traffic — Zigbee2MQTT does not retain device state topics | Pass `collect_seconds` to listen briefly, or use `z2m_network_map` for authoritative link quality |
 | `z2m_coordinator_check` | A Texas Instruments adapter (CC2652/CC1352) | Returns an error on other adapters; `z2m_bridge_info` reports whether it is supported |
+
+## Security notes
+
+- The broker URL may carry credentials (`mqtt://user:pass@host`). They are redacted everywhere the URL is echoed back to a model or written to a log, and error text from the MQTT client is scrubbed before it leaves the process.
+- `safe` mode can actuate anything on the mesh via `z2m_set_state`, including locks, valves and sirens. Use `off` if that matters.
+- `z2m_permit_join` opens the network to any nearby Zigbee device for the duration of the window. It is in `safe` because it is routine and reversible, but it is a security boundary.
 
 ## Example prompts
 
@@ -165,6 +175,9 @@ npm install
 npm run build
 npm run watch
 
+# Unit tests. No broker required; they run on every push across Node 20, 22 and 24.
+npm test
+
 # Manual smoke test against a real instance
 Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/smoke.mjs
 Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/smoke.mjs z2m_list_devices '{"only_problems":true}'
@@ -178,6 +191,10 @@ Z2M_MQTT_URL=mqtt://192.168.1.10:1883 node scripts/roundtrip.mjs
 Note that an MCP server may receive requests concurrently. When testing ordering,
 await each response before sending the next, as `roundtrip.mjs` does — piping
 several requests at once will produce misleading results.
+
+The unit tests cover health classification, capability detection, topic routing,
+write-mode gating and configuration parsing. They are broker-free by design, so
+anything that needs a live mesh belongs in `scripts/` instead.
 
 Releases are tag-driven: `npm version <patch|minor|major>` then
 `git push --follow-tags`. CI publishes to npm with provenance, rewrites

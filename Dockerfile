@@ -16,4 +16,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# A stdio server needs no privileges; the base image ships this user.
+USER node
 ENTRYPOINT ["node", "dist/index.js"]
