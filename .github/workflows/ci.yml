@@ -22,10 +22,10 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm run build
-      # No MQTT broker in CI, so assert the server starts and fails cleanly
-      # rather than crashing when required configuration is absent.
+      # No MQTT broker in CI. The server must still start and serve tools/list
+      # so clients and directory scanners can introspect it unconfigured.
       - name: Startup contract
         run: |
           out="$(node dist/index.js 2>&1 < /dev/null || true)"
           echo "$out"
-          echo "$out" | grep -q "Z2M_MQTT_URL is required"
+          echo "$out" | grep -q "Z2M_MQTT_URL is not set"

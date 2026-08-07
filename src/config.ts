@@ -61,17 +61,24 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
   return value;
 }
 
-export function loadConfig(): Config {
+export const MISSING_MQTT_URL =
+  "Z2M_MQTT_URL is not set, e.g. mqtt://192.168.1.10:1883 " +
+  "(mqtt://, mqtts://, ws:// and wss:// are supported). " +
+  "Point it at the MQTT broker Zigbee2MQTT uses, not the Zigbee2MQTT frontend port.";
+
+/**
+ * `requireMqttUrl: false` lets the server start unconfigured so clients and
+ * directory scanners can still enumerate tools; calls then fail with a clear
+ * message rather than the process refusing to start.
+ */
+export function loadConfig({ requireMqttUrl = true } = {}): Config {
   const mqttUrl = process.env.Z2M_MQTT_URL;
-  if (!mqttUrl) {
-    throw new Error(
-      "Z2M_MQTT_URL is required, e.g. mqtt://192.168.1.10:1883 " +
-        "(mqtt://, mqtts://, ws:// and wss:// are supported).",
-    );
+  if (!mqttUrl && requireMqttUrl) {
+    throw new Error(MISSING_MQTT_URL);
   }
 
   return {
-    mqttUrl,
+    mqttUrl: mqttUrl || "mqtt://unconfigured.invalid:1883",
     username: process.env.Z2M_MQTT_USERNAME || undefined,
     password: process.env.Z2M_MQTT_PASSWORD || undefined,
     baseTopic: (process.env.Z2M_BASE_TOPIC || "zigbee2mqtt").replace(/\/+$/, ""),

@@ -4,14 +4,23 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Z2MClient } from "./client.js";
-import { createLogger, loadConfig } from "./config.js";
+import { createLogger, loadConfig, type Config } from "./config.js";
 import { selectTools, type ToolContext } from "./tools.js";
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 
 async function main(): Promise<void> {
-  const config = loadConfig();
+  let config: Config;
+  let configError: string | undefined;
+  try {
+    config = loadConfig();
+  } catch (error) {
+    configError = (error as Error).message;
+    config = loadConfig({ requireMqttUrl: false });
+  }
+
   const log = createLogger(config.logLevel);
+  if (configError) log.error(configError);
   const client = new Z2MClient(config, log);
   const ctx: ToolContext = { client, config };
 
@@ -33,6 +42,13 @@ async function main(): Promise<void> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (configError) {
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: configError }],
+      };
+    }
+
     const tool = byName.get(request.params.name);
     if (!tool) {
       const known = [...byName.keys()].join(", ");
