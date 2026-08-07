@@ -25,6 +25,22 @@ const LOG_BUFFER = 1000;
 const EVENT_BUFFER = 200;
 
 /**
+ * Requests that do not change bridge state, so callers need not wait for a
+ * retained republish. `restart` is included because the bridge goes away rather
+ * than republishing.
+ */
+const NON_MUTATING = new Set([
+  "networkmap",
+  "health_check",
+  "coordinator_check",
+  "backup",
+  "restart",
+  "device/ota_update/check",
+  "device/ota_update/check/downgrade",
+  "device/reporting/read",
+]);
+
+/**
  * Zigbee2MQTT publishes its bridge topics as retained messages, so a fresh
  * subscription yields a complete picture within milliseconds. This client keeps
  * only the latest payload per topic in memory - there is deliberately no
@@ -35,6 +51,7 @@ export class Z2MClient {
   private connectPromise: Promise<void> | null = null;
   private transactionCounter = 0;
   private lastMessageAt = 0;
+  private bridgeRevision = 0;
 
   private readonly bridge = new Map<string, unknown>();
   private readonly deviceState = new Map<string, Record<string, unknown>>();
@@ -199,6 +216,7 @@ export class Z2MClient {
     }
     if (rest.startsWith("bridge/")) {
       this.bridge.set(rest.slice("bridge/".length), parsed ?? raw);
+      this.bridgeRevision++;
       return;
     }
 
@@ -244,8 +262,9 @@ export class Z2MClient {
     const timeout = timeoutMs ?? this.config.requestTimeoutMs;
     const transaction = `mcp-${++this.transactionCounter}`;
     const key = `${subTopic}|${transaction}`;
+    const revisionBefore = this.bridgeRevision;
 
-    return new Promise<T>((resolve, reject) => {
+    const result = await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.waiters.delete(key);
         reject(
@@ -276,6 +295,22 @@ export class Z2MClient {
         }
       });
     });
+
+    // Zigbee2MQTT acknowledges a request before republishing its retained bridge
+    // topics, so a caller could in principle read a stale cache immediately
+    // afterwards. Not reproducible against a local broker, where the republish
+    // always wins the race, but the ordering is not guaranteed. Bounded guard.
+    if (!NON_MUTATING.has(subTopic)) {
+      await this.awaitBridgeRefresh(revisionBefore);
+    }
+    return result;
+  }
+
+  private async awaitBridgeRefresh(since: number, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && this.bridgeRevision === since) {
+      await sleep(25);
+    }
   }
 
   /** Fire-and-forget publish, used for device `set` and `get` commands. */
