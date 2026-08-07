@@ -21,7 +21,7 @@
           "description": "MQTT broker URL used by Zigbee2MQTT, e.g. mqtt://192.168.1.10:1883. Supports mqtt://, mqtts://, ws:// and wss://. This is the broker, not the Zigbee2MQTT frontend port.",
           "isRequired": true,
           "format": "string",
-          "isSecret": false
+          "isSecret": true
         },
         {
           "name": "Z2M_MQTT_USERNAME",

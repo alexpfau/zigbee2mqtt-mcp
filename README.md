@@ -9,7 +9,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for **adminis
 
 Most Zigbee integrations already let an assistant turn a light on. This one is for the layer underneath: mesh health, weak links, devices that keep rejoining, stale batteries, firmware updates, pairing, binding, reporting intervals and device options — the things you normally open the Zigbee2MQTT frontend for.
 
-It talks directly to the Zigbee2MQTT [MQTT bridge API](https://www.zigbee2mqtt.io/guide/usage/mqtt_topics_and_messages.html), so it works with any Zigbee2MQTT 1.17+ installation regardless of whether you use Home Assistant, Node-RED, openHAB or nothing at all.
+It talks directly to the Zigbee2MQTT [MQTT bridge API](https://www.zigbee2mqtt.io/guide/usage/mqtt_topics_and_messages.html), so it works regardless of whether you use Home Assistant, Node-RED, openHAB or nothing at all. Tested against Zigbee2MQTT 2.x; several tools depend on bridge endpoints that only exist there, including `bridge/health`, `device/binds/clear` and the OTA scheduling topics.
 
 ## Why this exists
 
@@ -78,6 +78,7 @@ Add to your MCP configuration:
 | `Z2M_MQTT_URL` | *required* | Broker URL. `mqtt://`, `mqtts://`, `ws://`, `wss://` |
 | `Z2M_MQTT_USERNAME` / `Z2M_MQTT_PASSWORD` | – | Broker credentials |
 | `Z2M_BASE_TOPIC` | `zigbee2mqtt` | Must match `mqtt.base_topic` |
+| `Z2M_MQTT_CLIENT_ID` | `zigbee2mqtt-mcp-<pid>` | Override if your broker requires a fixed client ID |
 | `Z2M_WRITE_MODE` | `safe` | `off`, `safe` or `full` |
 | `Z2M_LOG_LEVEL` | `error` | Diagnostics on stderr |
 | `Z2M_WEAK_LINK_THRESHOLD` | `30` | Link quality below this is flagged |
@@ -98,7 +99,7 @@ Tools above the active tier are not registered at all, so a model cannot reach f
 | `safe` | **Default.** Read plus non-destructive writes: pairing, options, rename, configure, interview, binding, reporting, groups, state |
 | `full` | Everything, including device removal, OTA flashing, Touchlink and bridge restart |
 
-Irreversible tools (`z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`) additionally require `confirm: true` on every call. Three `safe` tools reduce state rather than only adding to it, so they are annotated destructive and the reducing actions also require `confirm: true`: `z2m_manage_group` (`remove`, `remove_all_members`) and `z2m_bind` (`clear`). `z2m_rename_device` is annotated destructive because it breaks anything referencing the old name, but stays unconfirmed since renaming back restores it.
+Irreversible tools (`z2m_remove_device`, `z2m_ota_update`, `z2m_touchlink`, `z2m_restart_bridge`, `z2m_set_bridge_options`) additionally require `confirm: true` on every call. Three `safe` tools reduce state rather than only adding to it, so they are annotated destructive: `z2m_rename_device`, `z2m_manage_group` and `z2m_bind`. Their reducing actions also require `confirm: true` — `z2m_manage_group` (`remove`, `remove_all_members`) and `z2m_bind` (`clear`). `z2m_rename_device` is annotated destructive because it breaks anything referencing the old name, but stays unconfirmed since renaming back restores it.
 
 Every tool also advertises MCP [tool annotations](https://modelcontextprotocol.io/specification/server/tools) so a client can decide what may run without prompting:
 
