@@ -179,6 +179,12 @@ Note that an MCP server may receive requests concurrently. When testing ordering
 await each response before sending the next, as `roundtrip.mjs` does — piping
 several requests at once will produce misleading results.
 
+Releases are tag-driven: `npm version <patch|minor|major>` then
+`git push --follow-tags`. CI publishes to npm with provenance, rewrites
+`server.json`'s version from the tag and publishes to the MCP Registry, then
+creates the GitHub release. The `version` committed in `server.json` is therefore
+not authoritative — the tag is.
+
 ## Safety
 
 This server can remove devices from your network and flash firmware. Both are irreversible and OTA failures can brick hardware. Those tools live in the `full` tier, which is **not** enabled by default — you must opt in with `Z2M_WRITE_MODE=full`. Broker credentials are read from the environment and never logged.
