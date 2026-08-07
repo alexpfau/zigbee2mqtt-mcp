@@ -196,6 +196,17 @@ The unit tests cover health classification, capability detection, topic routing,
 write-mode gating and configuration parsing. They are broker-free by design, so
 anything that needs a live mesh belongs in `scripts/` instead.
 
+A passing suite only proves the tests ran, so `scripts/mutate.mjs` breaks the
+source one change at a time and checks the suite notices each one:
+
+```bash
+node scripts/mutate.mjs          # every mutant
+node scripts/mutate.mjs redact   # only mutants whose name matches
+```
+
+A surviving mutant marks behaviour nothing actually tests, and exits non-zero.
+Add a mutant alongside any fix worth keeping fixed.
+
 Releases are tag-driven: `npm version <patch|minor|major>` then
 `git push --follow-tags`. CI publishes to npm with provenance, rewrites
 `server.json`'s version from the tag and publishes to the MCP Registry, then
