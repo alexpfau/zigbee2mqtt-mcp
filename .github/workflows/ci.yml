@@ -31,6 +31,59 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "Z2M_MQTT_URL is not set"
 
+  # The README tells people to run the image, so the image has to be built and
+  # exercised here. Nothing else in CI touches the Dockerfile.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t zigbee2mqtt-mcp:ci .
+
+      - name: Runs as a non-root user
+        run: |
+          uid="$(docker run --rm --entrypoint id zigbee2mqtt-mcp:ci -u)"
+          echo "container uid: $uid"
+          if [ "$uid" = "0" ]; then
+            echo "::error::image runs as root"
+            exit 1
+          fi
+
+      - name: Ships no source, tests or dev dependencies
+        run: |
+          docker run --rm --entrypoint sh zigbee2mqtt-mcp:ci -c '
+            for p in /app/src /app/test /app/dist-test /app/tsconfig.json /app/node_modules/typescript; do
+              if [ -e "$p" ]; then echo "unexpected in image: $p"; exit 1; fi
+            done
+            echo "runtime layer is clean"
+          '
+
+      - name: Startup contract
+        run: |
+          out="$(docker run --rm -i zigbee2mqtt-mcp:ci < /dev/null 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -q "Z2M_MQTT_URL is not set"
+
+      - name: Serves tools/list without a broker
+        run: |
+          # stdin must stay open past the reply; EOF shuts the server down.
+          out="$( { printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 5; } \
+            | docker run --rm -i zigbee2mqtt-mcp:ci 2>/dev/null )"
+          count="$(printf '%s' "$out" | grep -o '"name":"z2m_[a-z_]*"' | sort -u | wc -l)"
+          echo "tools advertised: $count"
+          if [ "$count" -lt 15 ]; then
+            echo "::error::image did not serve a usable tool list"
+            printf '%s\n' "$out" | head -5
+            exit 1
+          fi
+
+      - name: Report image size
+        run: docker image ls zigbee2mqtt-mcp:ci --format '{{.Size}}'
+
   audit:
     runs-on: ubuntu-latest
     steps:
