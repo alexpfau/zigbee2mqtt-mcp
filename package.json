@@ -40,6 +40,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
+    "test": "tsc -p tsconfig.test.json && cd dist-test && node --test",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
