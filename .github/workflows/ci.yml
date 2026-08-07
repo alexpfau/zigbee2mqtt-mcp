@@ -22,6 +22,7 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npm run build
+      - run: npm test
       # No MQTT broker in CI. The server must still start and serve tools/list
       # so clients and directory scanners can introspect it unconfigured.
       - name: Startup contract
@@ -29,3 +30,27 @@ jobs:
           out="$(node dist/index.js 2>&1 < /dev/null || true)"
           echo "$out"
           echo "$out" | grep -q "Z2M_MQTT_URL is not set"
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      # A lockfile generated behind a corporate proxy pins private feed URLs and
+      # downgrades integrity hashes to sha1, which nobody outside can install.
+      - name: Lockfile resolves from the public registry
+        run: |
+          if grep -o '"resolved": "[^"]*"' package-lock.json | grep -v 'https://registry.npmjs.org/'; then
+            echo "::error::package-lock.json references a non-public registry"
+            exit 1
+          fi
+          if grep -q '"integrity": "sha1-' package-lock.json; then
+            echo "::error::package-lock.json contains sha1 integrity hashes"
+            exit 1
+          fi
+      # Only runtime dependencies ship to users, so a dev-only advisory should
+      # not block a release, but it is still worth surfacing in the log.
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm audit || true
