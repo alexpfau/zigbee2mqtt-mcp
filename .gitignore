@@ -4,3 +4,6 @@ dist-test/
 *.log
 .env
 .DS_Store
+
+# Ignore local-only MCP server config (may contain access tokens)
+.mcp.json
