@@ -4,6 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/zigbee2mqtt-mcp.svg)](https://www.npmjs.com/package/zigbee2mqtt-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![zigbee2mqtt-mcp MCP server](https://glama.ai/mcp/servers/alexpfau/zigbee2mqtt-mcp/badges/score.svg)](https://glama.ai/mcp/servers/alexpfau/zigbee2mqtt-mcp)
+[![Zigbee2MQTT MCP on mcprush](https://mcprush.com/badge/zigbee2mqtt-mcp/score.svg)](https://mcprush.com/to/zigbee2mqtt-mcp?ref=badge)
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server for **administering** a Zigbee2MQTT estate.
 
@@ -205,7 +206,7 @@ node scripts/mutate.mjs          # every mutant
 node scripts/mutate.mjs redact   # only mutants whose name matches
 ```
 
-A surviving mutant marks behaviour nothing actually tests, and exits non-zero.
+A surviving mutant marks behavior nothing actually tests, and exits non-zero.
 Add a mutant alongside any fix worth keeping fixed.
 
 Releases are tag-driven: `npm version <patch|minor|major>` then
